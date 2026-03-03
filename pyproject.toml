@@ -1,0 +1,66 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hyperscaled"
+version = "0.1.0"
+description = "CLI & SDK for the Hyperscaled funded trading platform on Hyperliquid"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "Hyperscaled" }]
+keywords = ["trading", "hyperliquid", "funded-trading", "cli", "sdk"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Typing :: Typed",
+]
+dependencies = [
+    "typer[all]>=0.9.0",
+    "httpx>=0.27",
+    "pydantic>=2",
+    "tomli>=2.0; python_version < '3.11'",
+    "tomli-w>=1.0",
+    "rich>=13",
+]
+
+[project.optional-dependencies]
+# HL SDK is optional until Sprint 06 (SDK-010) when trade submission lands
+hl = ["hyperliquid-python-sdk>=0.4"]
+dev = [
+    "ruff>=0.9",
+    "mypy>=1.14",
+    "pytest>=8",
+    "pytest-asyncio>=0.25",
+]
+
+[project.scripts]
+hyperscaled = "hyperscaled.cli.main:app"
+
+[project.urls]
+Homepage = "https://hyperscaled.com"
+Repository = "https://github.com/hyperscaled/hyperscaled-sdk"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
