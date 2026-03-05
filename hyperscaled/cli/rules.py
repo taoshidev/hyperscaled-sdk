@@ -1,6 +1,5 @@
 """CLI commands for Vanta Network rules. Target: Sprint 06."""
 
-
 import typer
 
 app = typer.Typer(no_args_is_help=True)
@@ -17,6 +16,4 @@ def list_rules(
 @app.command("check")
 def check(pair: str, size: float) -> None:
     """Validate a hypothetical trade against rules."""
-    typer.echo(
-        f"Not yet implemented — target: Sprint 06 (SDK-015) [pair={pair}, size={size}]"
-    )
+    typer.echo(f"Not yet implemented — target: Sprint 06 (SDK-015) [pair={pair}, size={size}]")

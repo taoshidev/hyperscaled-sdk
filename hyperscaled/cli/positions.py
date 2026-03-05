@@ -1,6 +1,5 @@
 """CLI commands for positions and orders. Target: Sprint 06."""
 
-
 import typer
 
 app = typer.Typer(no_args_is_help=True)
@@ -11,9 +10,7 @@ def open_positions(
     json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
 ) -> None:
     """Show open positions."""
-    typer.echo(
-        f"Not yet implemented — target: Sprint 06 (SDK-011) [json={json_output}]"
-    )
+    typer.echo(f"Not yet implemented — target: Sprint 06 (SDK-011) [json={json_output}]")
 
 
 @app.command("history")

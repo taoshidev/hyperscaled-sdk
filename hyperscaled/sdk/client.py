@@ -54,9 +54,7 @@ class _SubClientDescriptor:
         cached = getattr(obj, self._attr, None)
         if cached is not None:
             return cached
-        raise NotImplementedError(
-            f"{self._name} is not yet implemented — target: {self._target}"
-        )
+        raise NotImplementedError(f"{self._name} is not yet implemented — target: {self._target}")
 
     def __set__(self, obj: Any, value: Any) -> None:
         setattr(obj, self._attr, value)

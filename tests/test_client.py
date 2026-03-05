@@ -60,9 +60,7 @@ class TestConstruction:
         client = HyperscaledClient()
         assert client.config.wallet.hl_address == VALID_ADDRESS
 
-    def test_payout_wallet_override(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_payout_wallet_override(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
         client = HyperscaledClient(payout_wallet=VALID_ADDRESS)
         assert client.config.wallet.payout_address == VALID_ADDRESS

@@ -11,9 +11,7 @@ def purchase(
     size: int = typer.Option(..., help="Funded account size"),
 ) -> None:
     """Purchase a funded account through an entity miner."""
-    typer.echo(
-        f"Not yet implemented — target: Sprint 05 (SDK-007) [miner={miner}, size={size}]"
-    )
+    typer.echo(f"Not yet implemented — target: Sprint 05 (SDK-007) [miner={miner}, size={size}]")
 
 
 @app.command("status")
