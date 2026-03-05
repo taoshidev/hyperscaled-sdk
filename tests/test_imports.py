@@ -28,6 +28,7 @@ MODULES = [
     "hyperscaled.cli.config",
     "hyperscaled.sdk",
     "hyperscaled.sdk.client",
+    "hyperscaled.sdk.miners",
     "hyperscaled.sdk.data",
     "hyperscaled.sdk.backtest",
     "hyperscaled.sdk.account",

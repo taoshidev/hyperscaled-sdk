@@ -10,6 +10,7 @@ import pytest
 
 from hyperscaled.sdk.client import HyperscaledClient, _run_sync
 from hyperscaled.sdk.config import Config, WalletConfig
+from hyperscaled.sdk.miners import MinersClient
 
 VALID_ADDRESS = "0x" + "a1" * 20
 VALID_ADDRESS_2 = "0x" + "b2" * 20
@@ -161,7 +162,6 @@ class TestSyncHelpers:
 
 class TestLazySubClients:
     STUBS = [
-        ("miners", "SDK-005"),
         ("register", "Sprint 05"),
         ("trade", "Sprint 06"),
         ("portfolio", "Sprint 06"),
@@ -181,6 +181,16 @@ class TestLazySubClients:
         client = HyperscaledClient()
         with pytest.raises(NotImplementedError, match=target):
             getattr(client, attr)
+
+    def test_miners_lazy_loaded(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
+        client = HyperscaledClient()
+        assert getattr(client, "_miners", None) is None
+
+        miners = client.miners
+
+        assert isinstance(miners, MinersClient)
+        assert client._miners is miners
 
     def test_sub_client_settable(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")

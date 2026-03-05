@@ -33,7 +33,11 @@ def _now() -> datetime:
 
 
 def _pricing_tier() -> PricingTier:
-    return PricingTier(account_size=50_000, cost=Decimal("250.00"))
+    return PricingTier(
+        account_size=50_000,
+        cost=Decimal("250.00"),
+        profit_split=_profit_split(),
+    )
 
 
 def _profit_split() -> ProfitSplit:
@@ -44,16 +48,21 @@ def _entity_miner() -> EntityMiner:
     return EntityMiner(
         name="Vanta Trading",
         slug="vantatrading",
-        url="https://vantatrading.com",
         pricing_tiers=[
-            PricingTier(account_size=25_000, cost=Decimal("150.00")),
-            PricingTier(account_size=50_000, cost=Decimal("250.00")),
+            PricingTier(
+                account_size=25_000,
+                cost=Decimal("150.00"),
+                profit_split=_profit_split(),
+            ),
+            PricingTier(
+                account_size=50_000,
+                cost=Decimal("250.00"),
+                profit_split=_profit_split(),
+            ),
         ],
-        profit_split=_profit_split(),
         payout_cadence="weekly",
-        supported_pairs=["BTC-USDC", "ETH-USDC", "SOL-USDC"],
-        leverage_limits={"BTC": 50.0, "ETH": 50.0, "SOL": 20.0},
         available_account_sizes=[25_000, 50_000, 100_000],
+        brand_color="#3b82f6",
     )
 
 
@@ -72,6 +81,7 @@ class TestPricingTier:
         tier = _pricing_tier()
         assert tier.account_size == 50_000
         assert tier.cost == Decimal("250.00")
+        assert tier.profit_split.trader_pct == 80
 
     def test_json_roundtrip(self) -> None:
         tier = _pricing_tier()
@@ -104,21 +114,18 @@ class TestEntityMiner:
         miner = _entity_miner()
         assert miner.slug == "vantatrading"
         assert len(miner.pricing_tiers) == 2
-        assert miner.profit_split.trader_pct == 80
-        assert miner.leverage_limits["BTC"] == 50.0
+        assert miner.pricing_tiers[0].profit_split.trader_pct == 80
+        assert miner.brand_color == "#3b82f6"
 
-    def test_optional_url_defaults_to_none(self) -> None:
+    def test_optional_brand_color_defaults_to_none(self) -> None:
         miner = EntityMiner(
             name="Test",
             slug="test",
             pricing_tiers=[],
-            profit_split=_profit_split(),
             payout_cadence="weekly",
-            supported_pairs=[],
-            leverage_limits={},
             available_account_sizes=[],
         )
-        assert miner.url is None
+        assert miner.brand_color is None
 
     def test_json_roundtrip(self) -> None:
         miner = _entity_miner()

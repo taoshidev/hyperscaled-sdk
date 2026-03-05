@@ -91,7 +91,6 @@ class HyperscaledClient:
     rules = _SubClientDescriptor("RulesClient", "Sprint 06")
     data = _SubClientDescriptor("DataClient", "Phase 2")
     backtest = _SubClientDescriptor("BacktestClient", "Phase 2")
-    miners = _SubClientDescriptor("MinersClient", "SDK-005")
 
     def __init__(
         self,
@@ -128,6 +127,21 @@ class HyperscaledClient:
             self._http = self._build_http_client()
             self._owns_http = True
         return self._http
+
+    @property
+    def miners(self) -> Any:
+        """The lazy-loaded entity miner client."""
+        cached = getattr(self, "_miners", None)
+        if cached is None:
+            from hyperscaled.sdk.miners import MinersClient
+
+            cached = MinersClient(self)
+            self._miners = cached
+        return cached
+
+    @miners.setter
+    def miners(self, value: Any) -> None:
+        self._miners = value
 
     def _build_http_client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(

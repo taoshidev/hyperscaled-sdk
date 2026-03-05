@@ -21,10 +21,8 @@ hyperscaled --help        # Show all command groups
 hyperscaled --version     # Print version
 hyperscaled config show   # Show local SDK configuration
 hyperscaled config path   # Print ~/.hyperscaled/config.toml
+hyperscaled miners list   # List entity miners and account sizes
 ```
-
-Miner discovery commands in `hyperscaled miners ...` are planned for `SDK-005` and
-are not implemented yet.
 
 ## SDK Quick Start
 
@@ -36,6 +34,10 @@ client = HyperscaledClient(hl_wallet="0x...", payout_wallet="0x...")
 # Inspect resolved configuration
 print(client.config.wallet.hl_address)
 print(client.config.api.hyperscaled_base_url)
+
+# Miner catalog discovery
+for miner in client.miners.list_all():
+    print(miner.slug, miner.payout_cadence, miner.available_account_sizes)
 ```
 
 ## Development

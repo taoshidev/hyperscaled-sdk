@@ -12,6 +12,7 @@ class PricingTier(BaseModel):
 
     account_size: int
     cost: Decimal
+    profit_split: ProfitSplit
 
 
 class ProfitSplit(BaseModel):
@@ -26,10 +27,7 @@ class EntityMiner(BaseModel):
 
     name: str
     slug: str
-    url: str | None = None
     pricing_tiers: list[PricingTier]
-    profit_split: ProfitSplit
     payout_cadence: str
-    supported_pairs: list[str]
-    leverage_limits: dict[str, float]
     available_account_sizes: list[int]
+    brand_color: str | None = None
