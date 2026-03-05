@@ -17,11 +17,14 @@ pip install "hyperscaled[hl]"
 ## CLI Quick Start
 
 ```bash
-hyperscaled --help              # Show all command groups
-hyperscaled --version           # Print version
-hyperscaled miners list         # Browse entity miners
-hyperscaled miners info <slug>  # Miner details
+hyperscaled --help        # Show all command groups
+hyperscaled --version     # Print version
+hyperscaled config show   # Show local SDK configuration
+hyperscaled config path   # Print ~/.hyperscaled/config.toml
 ```
+
+Miner discovery commands in `hyperscaled miners ...` are planned for `SDK-005` and
+are not implemented yet.
 
 ## SDK Quick Start
 
@@ -30,8 +33,9 @@ from hyperscaled import HyperscaledClient
 
 client = HyperscaledClient(hl_wallet="0x...", payout_wallet="0x...")
 
-# Browse entity miners
-miners = client.miners.list_all()
+# Inspect resolved configuration
+print(client.config.wallet.hl_address)
+print(client.config.api.hyperscaled_base_url)
 ```
 
 ## Development

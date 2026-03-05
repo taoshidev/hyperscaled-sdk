@@ -1,8 +1,8 @@
 """Hyperscaled — CLI & SDK for the Hyperscaled funded trading platform on Hyperliquid."""
 
-from importlib.metadata import version
+from hyperscaled._version import get_version
 
-__version__ = version("hyperscaled")
+__version__ = get_version()
 
 from hyperscaled.sdk.client import HyperscaledClient
 

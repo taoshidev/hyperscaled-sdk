@@ -186,14 +186,14 @@ class TestLazySubClients:
         monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
         client = HyperscaledClient()
         sentinel = object()
-        client.miners = sentinel  # type: ignore[assignment]
+        client.miners = sentinel
         assert client.miners is sentinel
 
     def test_sub_client_cached(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
         client = HyperscaledClient()
         sentinel = object()
-        client.miners = sentinel  # type: ignore[assignment]
+        client.miners = sentinel
         assert client.miners is client.miners
 
 
