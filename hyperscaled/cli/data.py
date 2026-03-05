@@ -21,8 +21,7 @@ def subscribe(provider: str) -> None:
 def stream(provider: str, pairs: str) -> None:
     """Stream real-time market data."""
     typer.echo(
-        f"Not yet implemented — target: Phase 2 (Sprint 07+) "
-        f"[provider={provider}, pairs={pairs}]"
+        f"Not yet implemented — target: Phase 2 (Sprint 07+) [provider={provider}, pairs={pairs}]"
     )
 
 

@@ -1,7 +1,9 @@
-"""Exception hierarchy for Hyperscaled SDK.
+"""Exception hierarchy for Hyperscaled SDK."""
 
-Wired in SDK-004 — stubs defined here for clean imports.
-"""
+from __future__ import annotations
+
+from datetime import datetime
+from decimal import Decimal
 
 
 class HyperscaledError(Exception):
@@ -9,4 +11,144 @@ class HyperscaledError(Exception):
 
     def __init__(self, message: str) -> None:
         self.message = message
+        super().__init__(message)
+
+
+class RuleViolationError(HyperscaledError):
+    """A Vanta Network rule was violated."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        rule_id: str,
+        limit: str,
+        actual_value: str,
+    ) -> None:
+        self.rule_id = rule_id
+        self.limit = limit
+        self.actual_value = actual_value
+        super().__init__(message)
+
+
+class UnsupportedPairError(RuleViolationError):
+    """Trade attempted on a pair not supported by the entity miner."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        rule_id: str,
+        limit: str,
+        actual_value: str,
+        pair: str,
+        supported_pairs: list[str],
+    ) -> None:
+        self.pair = pair
+        self.supported_pairs = supported_pairs
+        super().__init__(message, rule_id=rule_id, limit=limit, actual_value=actual_value)
+
+
+class LeverageLimitError(RuleViolationError):
+    """Requested leverage exceeds the allowed limit."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        rule_id: str,
+        limit: str,
+        actual_value: str,
+        requested_leverage: float,
+        max_leverage: float,
+    ) -> None:
+        self.requested_leverage = requested_leverage
+        self.max_leverage = max_leverage
+        super().__init__(message, rule_id=rule_id, limit=limit, actual_value=actual_value)
+
+
+class InsufficientBalanceError(RuleViolationError):
+    """Account balance is below the required minimum ($1,000)."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        rule_id: str,
+        limit: str,
+        actual_value: str,
+        balance: Decimal,
+        minimum_required: Decimal,
+    ) -> None:
+        self.balance = balance
+        self.minimum_required = minimum_required
+        super().__init__(message, rule_id=rule_id, limit=limit, actual_value=actual_value)
+
+
+class ExposureLimitError(RuleViolationError):
+    """Funded account notional exposure would be exceeded."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        rule_id: str,
+        limit: str,
+        actual_value: str,
+        current_exposure: Decimal,
+        max_exposure: Decimal,
+    ) -> None:
+        self.current_exposure = current_exposure
+        self.max_exposure = max_exposure
+        super().__init__(message, rule_id=rule_id, limit=limit, actual_value=actual_value)
+
+
+class DrawdownBreachError(RuleViolationError):
+    """Account drawdown exceeds the maximum allowed limit."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        rule_id: str,
+        limit: str,
+        actual_value: str,
+        current_drawdown: Decimal,
+        max_drawdown: Decimal,
+    ) -> None:
+        self.current_drawdown = current_drawdown
+        self.max_drawdown = max_drawdown
+        super().__init__(message, rule_id=rule_id, limit=limit, actual_value=actual_value)
+
+
+class OrderFrequencyError(RuleViolationError):
+    """Order submission rate exceeds the allowed limit."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        rule_id: str,
+        limit: str,
+        actual_value: str,
+        requests_per_minute: int,
+        limit_per_minute: int,
+    ) -> None:
+        self.requests_per_minute = requests_per_minute
+        self.limit_per_minute = limit_per_minute
+        super().__init__(message, rule_id=rule_id, limit=limit, actual_value=actual_value)
+
+
+class AccountSuspendedError(HyperscaledError):
+    """The funded account has been suspended."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: str,
+        suspended_at: datetime,
+    ) -> None:
+        self.reason = reason
+        self.suspended_at = suspended_at
         super().__init__(message)
