@@ -153,6 +153,20 @@ class TestEnvVarFallbacks:
         loaded = Config.load(path=config_path)
         assert loaded.wallet.hl_address == VALID_ADDRESS
 
+    def test_file_base_url_takes_precedence_over_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_path = tmp_path / "config.toml"
+        config = Config()
+        config._path = config_path
+        config.api.hyperscaled_base_url = "https://from-file.example.com"
+        config.save()
+
+        monkeypatch.setenv("HYPERSCALED_BASE_URL", "https://from-env.example.com")
+
+        loaded = Config.load(path=config_path)
+        assert loaded.api.hyperscaled_base_url == "https://from-file.example.com"
+
 
 # ── CLI commands ────────────────────────────────────────────
 

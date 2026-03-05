@@ -82,10 +82,11 @@ class Config(BaseModel):
             data = tomllib.loads(raw.decode()) if raw else {}
             config = cls.model_validate(data)
         else:
+            data = {}
             config = cls()
 
         config._path = config_path
-        config._apply_env_fallbacks()
+        config._apply_env_fallbacks(data)
 
         if not config_path.exists():
             config.save()
@@ -129,20 +130,26 @@ class Config(BaseModel):
         validated = section.__class__.model_validate(section_data)
         setattr(self, section_name, validated)
 
-    def _apply_env_fallbacks(self) -> None:
+    def _apply_env_fallbacks(self, file_data: dict[str, object]) -> None:
         env_hl = os.environ.get("HYPERSCALED_HL_ADDRESS", "")
         env_payout = os.environ.get("HYPERSCALED_PAYOUT_ADDRESS", "")
         env_base_url = os.environ.get("HYPERSCALED_BASE_URL", "")
 
-        if not self.wallet.hl_address and env_hl:
+        wallet_data = file_data.get("wallet")
+        api_data = file_data.get("api")
+
+        wallet_data = wallet_data if isinstance(wallet_data, dict) else {}
+        api_data = api_data if isinstance(api_data, dict) else {}
+
+        if not wallet_data.get("hl_address") and env_hl:
             self.wallet = WalletConfig(
                 hl_address=env_hl,
                 payout_address=self.wallet.payout_address,
             )
-        if not self.wallet.payout_address and env_payout:
+        if not wallet_data.get("payout_address") and env_payout:
             self.wallet = WalletConfig(
                 hl_address=self.wallet.hl_address,
                 payout_address=env_payout,
             )
-        if env_base_url:
+        if not api_data.get("hyperscaled_base_url") and env_base_url:
             self.api = ApiConfig(hyperscaled_base_url=env_base_url)

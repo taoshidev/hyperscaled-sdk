@@ -1,9 +1,8 @@
 """Hyperscaled CLI — entry point and top-level command groups."""
 
-from importlib.metadata import version
-
 import typer
 
+from hyperscaled._version import get_version
 from hyperscaled.cli.account import app as account_app
 from hyperscaled.cli.backtest import app as backtest_app
 from hyperscaled.cli.config import app as config_app
@@ -38,7 +37,7 @@ app.add_typer(rules_app, name="rules", help="Vanta Network rules and trade valid
 
 def _version_callback(value: bool) -> None:
     if value:
-        typer.echo(f"hyperscaled {version('hyperscaled')}")
+        typer.echo(f"hyperscaled {get_version()}")
         raise typer.Exit()
 
 
