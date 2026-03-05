@@ -6,6 +6,7 @@ import typer
 
 from hyperscaled.cli.account import app as account_app
 from hyperscaled.cli.backtest import app as backtest_app
+from hyperscaled.cli.config import app as config_app
 from hyperscaled.cli.data import app as data_app
 from hyperscaled.cli.info import app as info_app
 from hyperscaled.cli.kyc import app as kyc_app
@@ -22,6 +23,7 @@ app = typer.Typer(
     rich_markup_mode="rich",
 )
 
+app.add_typer(config_app, name="config", help="Manage local configuration.")
 app.add_typer(data_app, name="data", help="Market data providers and streaming.")
 app.add_typer(backtest_app, name="backtest", help="Backtesting with QuantConnect Lean.")
 app.add_typer(account_app, name="account", help="Hyperliquid account setup and funding.")

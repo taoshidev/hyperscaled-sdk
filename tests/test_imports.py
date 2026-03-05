@@ -18,6 +18,8 @@ MODULES = [
     "hyperscaled.cli.info",
     "hyperscaled.cli.kyc",
     "hyperscaled.cli.rules",
+    "hyperscaled.sdk.config",
+    "hyperscaled.cli.config",
     "hyperscaled.sdk",
     "hyperscaled.sdk.client",
     "hyperscaled.sdk.data",
