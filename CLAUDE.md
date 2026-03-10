@@ -13,12 +13,12 @@ source .venv/bin/activate
 
 ## Documentation
 
-Refer to the project documentation before implementing new features:
+Refer to the project planning docs before implementing new features:
 
-- `docs/SPRINT_1.md` — Current sprint tickets, acceptance criteria, and dependency graph
-- `docs/CLI_SDK_DESIGN.md` — Full CLI & SDK design spec (feature specs, API contracts, design principles)
-- `docs/OVERVIEW.md` — How the three repos (landing page, Chrome extension, Vanta Network) fit together
-- `docs/reports/` — Completion reports for finished tickets (SDK-001, SDK-002, etc.)
+- `planning/sprints/SPRINT_2.md` — Current sprint tickets, acceptance criteria, and dependency graph
+- `planning/Hyperscaled CLI & SDK Design V2.md` — Full CLI & SDK design spec (feature specs, API contracts, design principles)
+- `planning/OVERVIEW.md` — How the three repos (landing page, Chrome extension, Vanta Network) fit together
+- `planning/reports/` — Completion reports for finished tickets (SDK-001, SDK-002, etc.)
 
 ## Development Commands
 
