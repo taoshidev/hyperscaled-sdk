@@ -33,7 +33,8 @@ _DEFAULT_DIR = Path.home() / ".hyperscaled"
 _DEFAULT_PATH = _DEFAULT_DIR / "config.toml"
 
 
-def _is_valid_hl_address(value: str) -> bool:
+def is_valid_hl_address(value: str) -> bool:
+    """Return ``True`` when ``value`` matches the strict HL/EVM address format."""
     return bool(_HL_ADDRESS_RE.match(value))
 
 
@@ -44,7 +45,7 @@ class WalletConfig(BaseModel):
     @field_validator("hl_address", "payout_address")
     @classmethod
     def _validate_address(cls, v: str) -> str:
-        if v and not _is_valid_hl_address(v):
+        if v and not is_valid_hl_address(v):
             raise ValueError(
                 f"Invalid wallet address: {v!r} — expected format 0x followed by 40 hex chars"
             )

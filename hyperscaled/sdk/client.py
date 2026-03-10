@@ -85,7 +85,6 @@ class HyperscaledClient:
     register = _SubClientDescriptor("RegisterClient", "Sprint 05")
     trade = _SubClientDescriptor("TradingClient", "Sprint 06")
     portfolio = _SubClientDescriptor("PortfolioClient", "Sprint 06")
-    account = _SubClientDescriptor("AccountClient", "Sprint 06")
     payouts = _SubClientDescriptor("PayoutsClient", "Sprint 06")
     kyc = _SubClientDescriptor("KYCClient", "Sprint 06")
     rules = _SubClientDescriptor("RulesClient", "Sprint 06")
@@ -142,6 +141,21 @@ class HyperscaledClient:
     @miners.setter
     def miners(self, value: Any) -> None:
         self._miners = value
+
+    @property
+    def account(self) -> Any:
+        """The lazy-loaded account client."""
+        cached = getattr(self, "_account", None)
+        if cached is None:
+            from hyperscaled.sdk.account import AccountClient
+
+            cached = AccountClient(self)
+            self._account = cached
+        return cached
+
+    @account.setter
+    def account(self, value: Any) -> None:
+        self._account = value
 
     def _build_http_client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(

@@ -8,6 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from hyperscaled.sdk.account import AccountClient
 from hyperscaled.sdk.client import HyperscaledClient, _run_sync
 from hyperscaled.sdk.config import Config, WalletConfig
 from hyperscaled.sdk.miners import MinersClient
@@ -165,7 +166,6 @@ class TestLazySubClients:
         ("register", "Sprint 05"),
         ("trade", "Sprint 06"),
         ("portfolio", "Sprint 06"),
-        ("account", "Sprint 06"),
         ("payouts", "Sprint 06"),
         ("kyc", "Sprint 06"),
         ("rules", "Sprint 06"),
@@ -192,12 +192,24 @@ class TestLazySubClients:
         assert isinstance(miners, MinersClient)
         assert client._miners is miners
 
+    def test_account_lazy_loaded(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
+        client = HyperscaledClient()
+        assert getattr(client, "_account", None) is None
+
+        account = client.account
+
+        assert isinstance(account, AccountClient)
+        assert client._account is account
+
     def test_sub_client_settable(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
         client = HyperscaledClient()
         sentinel = object()
         client.miners = sentinel
         assert client.miners is sentinel
+        client.account = sentinel
+        assert client.account is sentinel
 
     def test_sub_client_cached(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
