@@ -1,4 +1,4 @@
-"""Account models — info, leverage limits, status."""
+"""Account models — info, leverage limits, status, balance."""
 
 from __future__ import annotations
 
@@ -7,12 +7,22 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+MINIMUM_BALANCE = Decimal("1000.00")
+
 
 class LeverageLimits(BaseModel):
     """Leverage constraints at the account and per-pair level."""
 
     account_level: float
     position_level: dict[str, float]
+
+
+class BalanceStatus(BaseModel):
+    """Result of a Hyperliquid wallet balance check."""
+
+    balance: Decimal
+    meets_minimum: bool
+    minimum_required: Decimal = MINIMUM_BALANCE
 
 
 class AccountInfo(BaseModel):
