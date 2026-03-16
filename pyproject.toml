@@ -34,11 +34,13 @@ dependencies = [
 [project.optional-dependencies]
 # HL SDK is optional until Sprint 06 (SDK-010) when trade submission lands
 hl = ["hyperliquid-python-sdk>=0.4"]
+x402 = ["x402[httpx,evm]>=2.0"]
 dev = [
     "ruff>=0.9",
     "mypy>=1.14",
     "pytest>=8",
     "pytest-asyncio>=0.25",
+    "x402[httpx,evm]>=2.0",
 ]
 
 [project.scripts]

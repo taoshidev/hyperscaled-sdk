@@ -15,3 +15,5 @@ class RegistrationStatus(BaseModel):
     funded_account_id: str | None = None
     account_size: int
     estimated_time: str | None = None
+    tx_hash: str | None = None
+    message: str | None = None
