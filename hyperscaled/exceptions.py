@@ -152,3 +152,42 @@ class AccountSuspendedError(HyperscaledError):
         self.reason = reason
         self.suspended_at = suspended_at
         super().__init__(message)
+
+
+class PaymentError(HyperscaledError):
+    """x402 signing/settlement failure or missing dependencies."""
+
+    def __init__(self, message: str, *, tx_hash: str | None = None) -> None:
+        self.tx_hash = tx_hash
+        super().__init__(message)
+
+
+class RegistrationError(HyperscaledError):
+    """Backend returned an error during registration."""
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        self.status_code = status_code
+        super().__init__(message)
+
+
+class UnsupportedAccountSizeError(HyperscaledError):
+    """Requested account size is not available from this miner."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        requested_size: int,
+        available_sizes: list[int],
+    ) -> None:
+        self.requested_size = requested_size
+        self.available_sizes = available_sizes
+        super().__init__(message)
+
+
+class InvalidMinerError(HyperscaledError):
+    """Miner slug not found in the catalog."""
+
+    def __init__(self, message: str, *, slug: str) -> None:
+        self.slug = slug
+        super().__init__(message)

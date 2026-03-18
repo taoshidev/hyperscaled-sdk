@@ -82,7 +82,6 @@ class HyperscaledClient:
     precedence over environment variables.
     """
 
-    register = _SubClientDescriptor("RegisterClient", "Sprint 05")
     trade = _SubClientDescriptor("TradingClient", "Sprint 06")
     portfolio = _SubClientDescriptor("PortfolioClient", "Sprint 06")
     payouts = _SubClientDescriptor("PayoutsClient", "Sprint 06")
@@ -156,6 +155,21 @@ class HyperscaledClient:
     @account.setter
     def account(self, value: Any) -> None:
         self._account = value
+
+    @property
+    def register(self) -> Any:
+        """The lazy-loaded registration client."""
+        cached = getattr(self, "_register", None)
+        if cached is None:
+            from hyperscaled.sdk.register import RegisterClient
+
+            cached = RegisterClient(self)
+            self._register = cached
+        return cached
+
+    @register.setter
+    def register(self, value: Any) -> None:
+        self._register = value
 
     def _build_http_client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
