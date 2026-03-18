@@ -46,7 +46,7 @@ def _sample_miner() -> EntityMiner:
 
 
 class TestMinersClient:
-    async def test_list_all_normalizes_internal_backend_shape(
+    async def test_list_all_normalizes_current_entity_catalog_shape(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         transport = httpx.MockTransport(
@@ -79,26 +79,64 @@ class TestMinersClient:
         assert miner.pricing_tiers[0].profit_split.trader_pct == 80
         await client.close()
 
-    async def test_get_accepts_stable_backend_shape(
+    async def test_list_all_falls_back_to_legacy_catalog_route(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/entity":
+                return httpx.Response(404, json={"error": "not found"})
+            if request.url.path == "/api/v1/miners":
+                return httpx.Response(
+                    200,
+                    json=[
+                        {
+                            "name": "Vanta Trading",
+                            "slug": "vanta",
+                            "brand_color": "#3b82f6",
+                            "payout_cadence": "weekly",
+                            "available_account_sizes": [25_000],
+                            "pricing_tiers": [
+                                {
+                                    "account_size": 25_000,
+                                    "cost": "150.00",
+                                    "profit_split": {"trader_pct": 80, "miner_pct": 20},
+                                }
+                            ],
+                        }
+                    ],
+                )
+            return httpx.Response(404, json={"error": "not found"})
+
+        client = _make_client(tmp_path, monkeypatch, httpx.MockTransport(handler))
+
+        miners = await client.miners.list_all_async()
+
+        assert len(miners) == 1
+        assert miners[0].slug == "vanta"
+        await client.close()
+
+    async def test_get_accepts_current_entity_catalog_shape(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         transport = httpx.MockTransport(
             lambda request: httpx.Response(
                 200,
-                json={
-                    "name": "Vanta Trading",
-                    "slug": "vanta",
-                    "brand_color": "#3b82f6",
-                    "payout_cadence": "weekly",
-                    "available_account_sizes": [25_000],
-                    "pricing_tiers": [
-                        {
-                            "account_size": 25_000,
-                            "cost": "150.00",
-                            "profit_split": {"trader_pct": 80, "miner_pct": 20},
-                        }
-                    ],
-                },
+                json=[
+                    {
+                        "name": "Vanta Trading",
+                        "slug": "vanta",
+                        "color": "#3b82f6",
+                        "payoutCadenceDays": 7,
+                        "tiers": [{"accountSize": 25_000, "priceUsdc": 150, "profitSplit": 80}],
+                    },
+                    {
+                        "name": "Zoku Trading",
+                        "slug": "zoku",
+                        "color": "#7c3aed",
+                        "payoutCadenceDays": 14,
+                        "tiers": [{"accountSize": 50_000, "priceUsdc": 250, "profitSplit": 75}],
+                    },
+                ],
             )
         )
         client = _make_client(tmp_path, monkeypatch, transport)
@@ -110,6 +148,30 @@ class TestMinersClient:
         await client.close()
 
     def test_list_all_sync_outside_event_loop(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json=[
+                    {
+                        "name": "Vanta Trading",
+                        "slug": "vanta",
+                        "color": "#3b82f6",
+                        "payoutCadenceDays": 7,
+                        "tiers": [{"accountSize": 25_000, "priceUsdc": 150, "profitSplit": 80}],
+                    }
+                ],
+            )
+        )
+        client = _make_client(tmp_path, monkeypatch, transport)
+
+        miners = cast(list[EntityMiner], client.miners.list_all())
+
+        assert len(miners) == 1
+        client.close_sync()
+
+    async def test_get_missing_slug_raises_hyperscaled_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         transport = httpx.MockTransport(
@@ -134,47 +196,48 @@ class TestMinersClient:
         )
         client = _make_client(tmp_path, monkeypatch, transport)
 
-        miners = cast(list[EntityMiner], client.miners.list_all())
-
-        assert len(miners) == 1
-        client.close_sync()
-
-    async def test_get_404_raises_hyperscaled_error(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        transport = httpx.MockTransport(
-            lambda request: httpx.Response(404, json={"error": "not found"})
-        )
-        client = _make_client(tmp_path, monkeypatch, transport)
-
-        with pytest.raises(HyperscaledError, match="not found"):
+        with pytest.raises(HyperscaledError, match="missing"):
             await client.miners.get_async("missing")
 
         await client.close()
 
-    async def test_compare_fetches_requested_slugs(
+    async def test_compare_fetches_requested_slugs_from_catalog(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         seen_paths: list[str] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
             seen_paths.append(request.url.path)
-            slug = request.url.path.rsplit("/", 1)[-1]
             return httpx.Response(
                 200,
-                json={
-                    "name": slug.title(),
-                    "slug": slug,
-                    "payout_cadence": "weekly",
-                    "available_account_sizes": [25_000],
-                    "pricing_tiers": [
-                        {
-                            "account_size": 25_000,
-                            "cost": "150.00",
-                            "profit_split": {"trader_pct": 80, "miner_pct": 20},
-                        }
-                    ],
-                },
+                json=[
+                    {
+                        "name": "Vanta Trading",
+                        "slug": "vanta",
+                        "payout_cadence": "weekly",
+                        "available_account_sizes": [25_000],
+                        "pricing_tiers": [
+                            {
+                                "account_size": 25_000,
+                                "cost": "150.00",
+                                "profit_split": {"trader_pct": 80, "miner_pct": 20},
+                            }
+                        ],
+                    },
+                    {
+                        "name": "Zoku Trading",
+                        "slug": "zoku",
+                        "payout_cadence": "weekly",
+                        "available_account_sizes": [25_000],
+                        "pricing_tiers": [
+                            {
+                                "account_size": 25_000,
+                                "cost": "175.00",
+                                "profit_split": {"trader_pct": 75, "miner_pct": 25},
+                            }
+                        ],
+                    },
+                ],
             )
 
         client = _make_client(tmp_path, monkeypatch, httpx.MockTransport(handler))
@@ -182,7 +245,37 @@ class TestMinersClient:
         miners = await client.miners.compare_async(["vanta", "zoku"])
 
         assert [miner.slug for miner in miners] == ["vanta", "zoku"]
-        assert seen_paths == ["/api/v1/miners/vanta", "/api/v1/miners/zoku"]
+        assert seen_paths == ["/api/entity"]
+        await client.close()
+
+    async def test_compare_missing_slug_raises_hyperscaled_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json=[
+                    {
+                        "name": "Vanta Trading",
+                        "slug": "vanta",
+                        "payout_cadence": "weekly",
+                        "available_account_sizes": [25_000],
+                        "pricing_tiers": [
+                            {
+                                "account_size": 25_000,
+                                "cost": "150.00",
+                                "profit_split": {"trader_pct": 80, "miner_pct": 20},
+                            }
+                        ],
+                    }
+                ],
+            )
+        )
+        client = _make_client(tmp_path, monkeypatch, transport)
+
+        with pytest.raises(HyperscaledError, match="missing"):
+            await client.miners.compare_async(["vanta", "missing"])
+
         await client.close()
 
 

@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from hyperscaled.sdk.client import HyperscaledClient
 
 T = TypeVar("T")
+_CATALOG_PATHS = ("/api/entity", "/api/v1/miners")
 
 
 def _sync_or_async(coro: Coroutine[Any, Any, T]) -> T | Coroutine[Any, Any, T]:
@@ -98,22 +99,35 @@ class MinersClient:
     def __init__(self, client: HyperscaledClient) -> None:
         self._client = client
 
+    async def _fetch_catalog_payload(self) -> list[dict[str, Any]]:
+        """Fetch the miner catalog from the current or legacy API route."""
+        for path in _CATALOG_PATHS:
+            try:
+                response = await self._client.http.get(path)
+            except httpx.HTTPError as exc:
+                raise HyperscaledError(f"Failed to fetch miners: {exc}") from exc
+
+            if response.status_code == 404:
+                continue
+
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raise HyperscaledError(
+                    "Failed to fetch miners: "
+                    f"{exc.response.status_code} {exc.response.reason_phrase}"
+                ) from exc
+
+            payload = response.json()
+            if not isinstance(payload, list):
+                raise HyperscaledError("Miner list response must be a JSON array.")
+            return payload
+
+        raise HyperscaledError("Failed to fetch miners: no supported catalog endpoint found.")
+
     async def list_all_async(self) -> list[EntityMiner]:
         """Fetch all entity miners from the Hyperscaled API."""
-        try:
-            response = await self._client.http.get("/api/v1/miners")
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise HyperscaledError(
-                f"Failed to fetch miners: {exc.response.status_code} {exc.response.reason_phrase}"
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise HyperscaledError(f"Failed to fetch miners: {exc}") from exc
-
-        payload = response.json()
-        if not isinstance(payload, list):
-            raise HyperscaledError("Miner list response must be a JSON array.")
-
+        payload = await self._fetch_catalog_payload()
         return [_entity_miner_from_raw(item) for item in payload]
 
     def list_all(self) -> list[EntityMiner] | Coroutine[Any, Any, list[EntityMiner]]:
@@ -122,27 +136,11 @@ class MinersClient:
 
     async def get_async(self, slug: str) -> EntityMiner:
         """Fetch a single entity miner by slug."""
-        try:
-            response = await self._client.http.get(f"/api/v1/miners/{slug}")
-        except httpx.HTTPError as exc:
-            raise HyperscaledError(f"Failed to fetch miner '{slug}': {exc}") from exc
-
-        if response.status_code == 404:
-            raise HyperscaledError(f"Miner '{slug}' not found.")
-
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise HyperscaledError(
-                f"Failed to fetch miner '{slug}': "
-                f"{exc.response.status_code} {exc.response.reason_phrase}"
-            ) from exc
-
-        payload = response.json()
-        if not isinstance(payload, dict):
-            raise HyperscaledError("Miner detail response must be a JSON object.")
-
-        return _entity_miner_from_raw(payload)
+        miners = await self.list_all_async()
+        for miner in miners:
+            if miner.slug == slug:
+                return miner
+        raise HyperscaledError(f"Miner '{slug}' not found.")
 
     def get(self, slug: str) -> EntityMiner | Coroutine[Any, Any, EntityMiner]:
         """Fetch one miner synchronously or asynchronously."""
@@ -152,7 +150,15 @@ class MinersClient:
         """Fetch multiple miners for side-by-side comparison."""
         if slugs is None:
             return await self.list_all_async()
-        return [await self.get_async(slug) for slug in slugs]
+
+        miners = await self.list_all_async()
+        miners_by_slug = {miner.slug: miner for miner in miners}
+
+        missing = [slug for slug in slugs if slug not in miners_by_slug]
+        if missing:
+            raise HyperscaledError(f"Miner '{missing[0]}' not found.")
+
+        return [miners_by_slug[slug] for slug in slugs]
 
     def compare(
         self, slugs: list[str] | None = None
