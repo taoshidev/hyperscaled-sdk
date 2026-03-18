@@ -1,8 +1,38 @@
-"""CLI commands for trade submission. Target: Sprint 06."""
+"""CLI commands for trade submission."""
+
+from __future__ import annotations
 
 import typer
+from rich.console import Console
+from rich.panel import Panel
+
+from hyperscaled.models.trading import Order
 
 app = typer.Typer(no_args_is_help=True)
+console = Console()
+
+
+def _render_order(order: Order) -> None:
+    """Print a human-readable summary of a submitted order."""
+    lines = [
+        f"[bold]Order ID:[/bold]       {order.hl_order_id}",
+        f"[bold]Pair:[/bold]           {order.pair}",
+        f"[bold]Side:[/bold]           {order.side}",
+        f"[bold]Size:[/bold]           {order.size}",
+        f"[bold]Type:[/bold]           {order.order_type}",
+        f"[bold]Status:[/bold]         {order.status}",
+    ]
+    if order.fill_price is not None:
+        lines.append(f"[bold]Fill Price:[/bold]     ${order.fill_price:,.2f}")
+    lines.append(f"[bold]Scaling Ratio:[/bold] {order.scaling_ratio}")
+    lines.append(f"[bold]Funded Size:[/bold]   ${order.funded_equivalent_size:,.2f}")
+    if order.take_profit is not None:
+        lines.append(f"[bold]Take Profit:[/bold]   ${order.take_profit:,.2f}")
+    if order.stop_loss is not None:
+        lines.append(f"[bold]Stop Loss:[/bold]     ${order.stop_loss:,.2f}")
+
+    style = "green" if order.status == "filled" else "yellow"
+    console.print(Panel("\n".join(lines), title="Order Submitted", border_style=style))
 
 
 @app.command("submit")
@@ -11,21 +41,43 @@ def submit(
     side: str = typer.Option(..., help="Trade side: long or short"),
     size: float = typer.Option(..., help="Position size"),
     order_type: str = typer.Option("market", "--type", help="Order type: market or limit"),
+    price: float | None = typer.Option(None, help="Limit price (required for limit orders)"),
+    take_profit: float | None = typer.Option(None, "--tp", help="Take profit price"),
+    stop_loss: float | None = typer.Option(None, "--sl", help="Stop loss price"),
 ) -> None:
     """Submit a trade on Hyperliquid."""
-    typer.echo(
-        f"Not yet implemented — target: Sprint 06 (SDK-010) "
-        f"[pair={pair}, side={side}, size={size}, type={order_type}]"
-    )
+    from decimal import Decimal
+
+    from hyperscaled import HyperscaledClient
+    from hyperscaled.exceptions import HyperscaledError
+
+    client = HyperscaledClient()
+    client.open_sync()
+    try:
+        order = client.trade.submit(
+            pair=pair,
+            side=side,
+            size=Decimal(str(size)),
+            order_type=order_type,
+            price=Decimal(str(price)) if price else None,
+            take_profit=Decimal(str(take_profit)) if take_profit else None,
+            stop_loss=Decimal(str(stop_loss)) if stop_loss else None,
+        )
+        _render_order(order)  # type: ignore[arg-type]
+    except (ValueError, HyperscaledError) as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=1) from None
+    finally:
+        client.close_sync()
 
 
 @app.command("cancel")
 def cancel(order_id: str) -> None:
     """Cancel an open order."""
-    typer.echo(f"Not yet implemented — target: Sprint 06 (SDK-010) [order_id={order_id}]")
+    typer.echo(f"Not yet implemented — target: SDK-011 [order_id={order_id}]")
 
 
 @app.command("cancel-all")
 def cancel_all() -> None:
     """Cancel all open orders."""
-    typer.echo("Not yet implemented — target: Sprint 06 (SDK-010)")
+    typer.echo("Not yet implemented — target: SDK-011")

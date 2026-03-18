@@ -64,6 +64,13 @@ class RegisterClient:
         self._client.config.set_value("account.funded_account_id", funded_account_id)
         self._client.config.save()
 
+    def _persist_funded_account_size(self, account_size: int) -> None:
+        """Persist funded account size to local config."""
+        if account_size <= 0:
+            return
+        self._client.config.set_value("account.funded_account_size", str(account_size))
+        self._client.config.save()
+
     # ── Helpers ───────────────────────────────────────────────
 
     async def _resolve_tier_index(self, miner_slug: str, account_size: int) -> tuple[int, Decimal]:
@@ -228,6 +235,7 @@ class RegisterClient:
             )
 
         data = paid_resp.json()
+        self._persist_funded_account_size(account_size)
         return RegistrationStatus(
             status=data.get("status", "pending"),
             account_size=account_size,
@@ -305,6 +313,8 @@ class RegisterClient:
         )
         if result.is_success:
             self._persist_funded_account_id(result.funded_account_id)
+            if data.get("account_size"):
+                self._persist_funded_account_size(int(data["account_size"]))
         return result
 
     def check_status(

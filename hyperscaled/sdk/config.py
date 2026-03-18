@@ -55,6 +55,7 @@ class WalletConfig(BaseModel):
 class AccountConfig(BaseModel):
     entity_miner: str = ""
     funded_account_id: str = ""
+    funded_account_size: int = 0
     kyc_status: Literal["not_started", "pending", "verified"] = "not_started"
 
 

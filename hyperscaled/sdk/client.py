@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import httpx
 
+from hyperscaled.exceptions import HyperscaledError
 from hyperscaled.sdk.config import Config
 
 if TYPE_CHECKING:
@@ -82,7 +84,6 @@ class HyperscaledClient:
     precedence over environment variables.
     """
 
-    trade = _SubClientDescriptor("TradingClient", "Sprint 06")
     portfolio = _SubClientDescriptor("PortfolioClient", "Sprint 06")
     payouts = _SubClientDescriptor("PayoutsClient", "Sprint 06")
     kyc = _SubClientDescriptor("KYCClient", "Sprint 06")
@@ -96,6 +97,7 @@ class HyperscaledClient:
         hl_wallet: str | None = None,
         payout_wallet: str | None = None,
         base_url: str | None = None,
+        hl_private_key: str | None = None,
     ) -> None:
         self._config = Config.load()
 
@@ -106,6 +108,7 @@ class HyperscaledClient:
         if base_url is not None:
             self._config.set_value("api.hyperscaled_base_url", base_url)
 
+        self._hl_private_key = hl_private_key
         self._http: httpx.AsyncClient | None = None
         self._owns_http = True
 
@@ -170,6 +173,31 @@ class HyperscaledClient:
     @register.setter
     def register(self, value: Any) -> None:
         self._register = value
+
+    @property
+    def trade(self) -> Any:
+        """The lazy-loaded trading client."""
+        cached = getattr(self, "_trade", None)
+        if cached is None:
+            from hyperscaled.sdk.trading import TradingClient
+
+            cached = TradingClient(self)
+            self._trade = cached
+        return cached
+
+    @trade.setter
+    def trade(self, value: Any) -> None:
+        self._trade = value
+
+    def _resolve_hl_private_key(self) -> str:
+        """Return the HL private key from constructor param or environment."""
+        resolved = self._hl_private_key or os.environ.get("HYPERSCALED_HL_PRIVATE_KEY", "")
+        if not resolved:
+            raise HyperscaledError(
+                "No Hyperliquid private key provided. "
+                "Pass hl_private_key= to HyperscaledClient() or set HYPERSCALED_HL_PRIVATE_KEY."
+            )
+        return resolved
 
     def _build_http_client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(

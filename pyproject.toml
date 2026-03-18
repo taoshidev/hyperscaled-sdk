@@ -29,11 +29,10 @@ dependencies = [
     "tomli>=2.0; python_version < '3.11'",
     "tomli-w>=1.0",
     "rich>=13",
+    "hyperliquid-python-sdk>=0.4",
 ]
 
 [project.optional-dependencies]
-# HL SDK is optional until Sprint 06 (SDK-010) when trade submission lands
-hl = ["hyperliquid-python-sdk>=0.4"]
 x402 = ["x402[httpx,evm]>=2.0"]
 dev = [
     "ruff>=0.9",

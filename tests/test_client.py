@@ -13,6 +13,7 @@ from hyperscaled.sdk.client import HyperscaledClient, _run_sync
 from hyperscaled.sdk.config import Config, WalletConfig
 from hyperscaled.sdk.miners import MinersClient
 from hyperscaled.sdk.register import RegisterClient
+from hyperscaled.sdk.trading import TradingClient
 
 VALID_ADDRESS = "0x" + "a1" * 20
 VALID_ADDRESS_2 = "0x" + "b2" * 20
@@ -164,7 +165,6 @@ class TestSyncHelpers:
 
 class TestLazySubClients:
     STUBS = [
-        ("trade", "Sprint 06"),
         ("portfolio", "Sprint 06"),
         ("payouts", "Sprint 06"),
         ("kyc", "Sprint 06"),
@@ -212,6 +212,16 @@ class TestLazySubClients:
         assert isinstance(register, RegisterClient)
         assert client._register is register
 
+    def test_trade_lazy_loaded(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
+        client = HyperscaledClient()
+        assert getattr(client, "_trade", None) is None
+
+        trade = client.trade
+
+        assert isinstance(trade, TradingClient)
+        assert client._trade is trade
+
     def test_sub_client_settable(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
         client = HyperscaledClient()
@@ -222,6 +232,8 @@ class TestLazySubClients:
         assert client.account is sentinel
         client.register = sentinel
         assert client.register is sentinel
+        client.trade = sentinel
+        assert client.trade is sentinel
 
     def test_sub_client_cached(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
