@@ -64,6 +64,18 @@ def _hl_top_level_failure() -> dict:
     return {"status": "err", "response": "Rate limited"}
 
 
+def _hl_cancel_response(*statuses: object) -> dict:
+    return {
+        "status": "ok",
+        "response": {
+            "type": "cancel",
+            "data": {
+                "statuses": list(statuses),
+            },
+        },
+    }
+
+
 @pytest.fixture()
 def trading_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> HyperscaledClient:
     monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
@@ -376,6 +388,121 @@ class TestErrorPaths:
             await trading_client.trade.submit_async(
                 pair="BTC-USDC", side="long", size=Decimal("0.01"), order_type="market"
             )
+
+
+# ── Cancellation flows ───────────────────────────────────────
+
+
+class TestCancellation:
+    async def test_cancel_single_success(self, trading_client: HyperscaledClient) -> None:
+        mock_exchange = MagicMock()
+        mock_exchange.cancel.return_value = _hl_cancel_response("success")
+        trading_client.trade._exchange = mock_exchange
+
+        mock_info = MagicMock()
+        mock_info.open_orders.return_value = [
+            {"coin": "BTC", "oid": 123456, "limitPx": "100000", "sz": "0.01", "timestamp": 1}
+        ]
+        trading_client.trade._info = mock_info
+
+        result = await trading_client.trade.cancel_async("123456")
+
+        assert result == {
+            "hl_order_id": "123456",
+            "pair": "BTC-USDC",
+            "status": "cancelled",
+            "message": "Order cancelled.",
+        }
+        mock_exchange.cancel.assert_called_once_with("BTC", 123456)
+
+    async def test_cancel_all_success(self, trading_client: HyperscaledClient) -> None:
+        mock_exchange = MagicMock()
+        mock_exchange.bulk_cancel.return_value = _hl_cancel_response("success", "success")
+        trading_client.trade._exchange = mock_exchange
+
+        mock_info = MagicMock()
+        mock_info.open_orders.return_value = [
+            {"coin": "BTC", "oid": 123456, "limitPx": "100000", "sz": "0.01", "timestamp": 1},
+            {"coin": "ETH", "oid": 789012, "limitPx": "3500", "sz": "0.5", "timestamp": 2},
+        ]
+        trading_client.trade._info = mock_info
+
+        result = await trading_client.trade.cancel_all_async()
+
+        assert result["status"] == "ok"
+        assert result["total_open_orders"] == 2
+        assert result["cancelled_count"] == 2
+        assert result["failed_count"] == 0
+        assert result["results"] == [
+            {
+                "hl_order_id": "123456",
+                "pair": "BTC-USDC",
+                "status": "cancelled",
+                "message": "Order cancelled.",
+            },
+            {
+                "hl_order_id": "789012",
+                "pair": "ETH-USDC",
+                "status": "cancelled",
+                "message": "Order cancelled.",
+            },
+        ]
+        mock_exchange.bulk_cancel.assert_called_once_with(
+            [{"coin": "BTC", "oid": 123456}, {"coin": "ETH", "oid": 789012}]
+        )
+
+    async def test_cancel_all_no_open_orders(self, trading_client: HyperscaledClient) -> None:
+        mock_exchange = MagicMock()
+        trading_client.trade._exchange = mock_exchange
+
+        mock_info = MagicMock()
+        mock_info.open_orders.return_value = []
+        trading_client.trade._info = mock_info
+
+        result = await trading_client.trade.cancel_all_async()
+
+        assert result == {
+            "status": "ok",
+            "message": "No open orders to cancel.",
+            "total_open_orders": 0,
+            "cancelled_count": 0,
+            "failed_count": 0,
+            "results": [],
+        }
+        mock_exchange.bulk_cancel.assert_not_called()
+
+    async def test_cancel_unknown_order_id(self, trading_client: HyperscaledClient) -> None:
+        mock_exchange = MagicMock()
+        trading_client.trade._exchange = mock_exchange
+
+        mock_info = MagicMock()
+        mock_info.open_orders.return_value = [
+            {"coin": "BTC", "oid": 999999, "limitPx": "100000", "sz": "0.01", "timestamp": 1}
+        ]
+        trading_client.trade._info = mock_info
+
+        result = await trading_client.trade.cancel_async("123456")
+
+        assert result == {
+            "hl_order_id": "123456",
+            "status": "not_found",
+            "message": "Order is not currently open or cancellable.",
+        }
+        mock_exchange.cancel.assert_not_called()
+
+    async def test_cancel_hl_api_failure(self, trading_client: HyperscaledClient) -> None:
+        mock_exchange = MagicMock()
+        mock_exchange.cancel.side_effect = ConnectionError("timeout")
+        trading_client.trade._exchange = mock_exchange
+
+        mock_info = MagicMock()
+        mock_info.open_orders.return_value = [
+            {"coin": "BTC", "oid": 123456, "limitPx": "100000", "sz": "0.01", "timestamp": 1}
+        ]
+        trading_client.trade._info = mock_info
+
+        with pytest.raises(HyperscaledError, match="order cancellation failed"):
+            await trading_client.trade.cancel_async("123456")
 
 
 # ── Pre-validate seam ────────────────────────────────────────

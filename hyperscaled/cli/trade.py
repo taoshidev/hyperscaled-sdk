@@ -1,4 +1,4 @@
-"""CLI commands for trade submission."""
+"""CLI commands for trade submission and cancellation."""
 
 from __future__ import annotations
 
@@ -33,6 +33,50 @@ def _render_order(order: Order) -> None:
 
     style = "green" if order.status == "filled" else "yellow"
     console.print(Panel("\n".join(lines), title="Order Submitted", border_style=style))
+
+
+def _render_cancel_result(result: dict[str, object]) -> None:
+    """Print a human-readable summary of a single cancellation attempt."""
+    lines = [f"[bold]Order ID:[/bold]       {result['hl_order_id']}"]
+    pair = result.get("pair")
+    if pair:
+        lines.append(f"[bold]Pair:[/bold]           {pair}")
+    lines.append(f"[bold]Status:[/bold]         {result['status']}")
+    lines.append(f"[bold]Message:[/bold]        {result['message']}")
+
+    status = str(result["status"])
+    if status == "cancelled":
+        style = "green"
+    elif status in {"not_found", "already_closed"}:
+        style = "yellow"
+    else:
+        style = "red"
+    console.print(Panel("\n".join(lines), title="Order Cancellation", border_style=style))
+
+
+def _render_cancel_all_result(result: dict[str, object]) -> None:
+    """Print a human-readable summary of a bulk cancellation attempt."""
+    lines = [
+        f"[bold]Status:[/bold]          {result['status']}",
+        f"[bold]Message:[/bold]         {result['message']}",
+        f"[bold]Open Orders:[/bold]     {result['total_open_orders']}",
+        f"[bold]Cancelled:[/bold]       {result['cancelled_count']}",
+        f"[bold]Failed:[/bold]          {result['failed_count']}",
+    ]
+
+    results = result.get("results", [])
+    if isinstance(results, list) and results:
+        lines.append("")
+        lines.append("[bold]Per-order results:[/bold]")
+        for entry in results:
+            if isinstance(entry, dict):
+                lines.append(
+                    f"- {entry.get('hl_order_id')} {entry.get('pair', '')} -> "
+                    f"{entry.get('status')}: {entry.get('message')}"
+                )
+
+    style = "green" if result["failed_count"] == 0 else "yellow"
+    console.print(Panel("\n".join(lines), title="Cancel All Orders", border_style=style))
 
 
 @app.command("submit")
@@ -74,10 +118,34 @@ def submit(
 @app.command("cancel")
 def cancel(order_id: str) -> None:
     """Cancel an open order."""
-    typer.echo(f"Not yet implemented — target: SDK-011 [order_id={order_id}]")
+    from hyperscaled import HyperscaledClient
+    from hyperscaled.exceptions import HyperscaledError
+
+    client = HyperscaledClient()
+    client.open_sync()
+    try:
+        result = client.trade.cancel(order_id)
+        _render_cancel_result(result)  # type: ignore[arg-type]
+    except (ValueError, HyperscaledError) as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=1) from None
+    finally:
+        client.close_sync()
 
 
 @app.command("cancel-all")
 def cancel_all() -> None:
     """Cancel all open orders."""
-    typer.echo("Not yet implemented — target: SDK-011")
+    from hyperscaled import HyperscaledClient
+    from hyperscaled.exceptions import HyperscaledError
+
+    client = HyperscaledClient()
+    client.open_sync()
+    try:
+        result = client.trade.cancel_all()
+        _render_cancel_all_result(result)  # type: ignore[arg-type]
+    except (ValueError, HyperscaledError) as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=1) from None
+    finally:
+        client.close_sync()
