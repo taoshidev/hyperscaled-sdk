@@ -2,13 +2,16 @@
 
 Handles the end-to-end purchase flow: wallet validation, balance check,
 tier resolution, x402 USDC payment, and backend registration submission.
+Also provides registration status polling against the Hyperscaled status
+endpoint (``GET /api/registration-status?hl_address=...``).
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Coroutine
+import time
+from collections.abc import Callable, Coroutine
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -19,16 +22,20 @@ from hyperscaled.exceptions import (
     InvalidMinerError,
     PaymentError,
     RegistrationError,
+    RegistrationPollTimeoutError,
     UnsupportedAccountSizeError,
 )
 from hyperscaled.models.account import MINIMUM_BALANCE
-from hyperscaled.models.registration import RegistrationStatus
+from hyperscaled.models.registration import TERMINAL_STATUSES, RegistrationStatus
 from hyperscaled.sdk.client import _run_sync
 
 if TYPE_CHECKING:
     from hyperscaled.sdk.client import HyperscaledClient
 
 T = TypeVar("T")
+
+_DEFAULT_POLL_INTERVAL = 5.0
+_DEFAULT_POLL_TIMEOUT = 300.0
 
 
 def _sync_or_async(coro: Coroutine[Any, Any, T]) -> T | Coroutine[Any, Any, T]:
@@ -240,5 +247,113 @@ class RegisterClient:
                 payout_wallet,
                 email=email,
                 private_key=private_key,
+            )
+        )
+
+    # ── Status polling ─────────────────────────────────────────
+
+    async def check_status_async(self, hl_address: str) -> RegistrationStatus:
+        """Fetch the current registration status for an HL wallet.
+
+        Calls ``GET /api/registration-status?hl_address=<address>`` and
+        returns a :class:`RegistrationStatus`.
+        """
+        if not self._client.account.validate_wallet(hl_address):
+            raise ValueError(
+                f"Invalid HL wallet address: {hl_address!r} "
+                "-- expected format 0x followed by 40 hex chars"
+            )
+
+        try:
+            resp = await self._client.http.get(
+                "/api/registration-status",
+                params={"hl_address": hl_address},
+            )
+        except httpx.HTTPError as exc:
+            raise RegistrationError(f"Registration status request failed: {exc}") from exc
+
+        if resp.status_code == 400:
+            data = resp.json()
+            raise RegistrationError(
+                data.get("error", "Invalid request"),
+                status_code=400,
+            )
+
+        if resp.status_code != 200:
+            raise RegistrationError(
+                f"Registration status check failed: {resp.status_code} {resp.text}",
+                status_code=resp.status_code,
+            )
+
+        data = resp.json()
+        return RegistrationStatus(
+            status=data.get("status", "pending"),
+            hl_address=data.get("hl_address", hl_address),
+        )
+
+    def check_status(
+        self, hl_address: str
+    ) -> RegistrationStatus | Coroutine[Any, Any, RegistrationStatus]:
+        """Check registration status (sync or async)."""
+        return _sync_or_async(self.check_status_async(hl_address))
+
+    async def poll_until_complete_async(
+        self,
+        hl_address: str,
+        *,
+        interval_seconds: float = _DEFAULT_POLL_INTERVAL,
+        timeout_seconds: float = _DEFAULT_POLL_TIMEOUT,
+        on_status: Callable[[RegistrationStatus], None] | None = None,
+    ) -> RegistrationStatus:
+        """Poll registration status until a terminal state is reached.
+
+        Calls :meth:`check_status_async` repeatedly, sleeping
+        ``interval_seconds`` between attempts.  Raises
+        :class:`RegistrationPollTimeoutError` if ``timeout_seconds`` elapses
+        without reaching a terminal status.
+
+        The optional ``on_status`` callback is invoked with each intermediate
+        :class:`RegistrationStatus` so callers can display progress.
+        """
+        start = time.monotonic()
+
+        last_status: RegistrationStatus | None = None
+        while True:
+            elapsed = time.monotonic() - start
+            if elapsed >= timeout_seconds:
+                raise RegistrationPollTimeoutError(
+                    f"Registration polling timed out after {elapsed:.0f}s. "
+                    f"Last status: {last_status.status if last_status else 'unknown'}",
+                    hl_address=hl_address,
+                    last_status=last_status.status if last_status else "unknown",
+                    elapsed_seconds=elapsed,
+                )
+
+            result = await self.check_status_async(hl_address)
+            last_status = result
+
+            if on_status is not None:
+                on_status(result)
+
+            if result.status in TERMINAL_STATUSES:
+                return result
+
+            await asyncio.sleep(interval_seconds)
+
+    def poll_until_complete(
+        self,
+        hl_address: str,
+        *,
+        interval_seconds: float = _DEFAULT_POLL_INTERVAL,
+        timeout_seconds: float = _DEFAULT_POLL_TIMEOUT,
+        on_status: Callable[[RegistrationStatus], None] | None = None,
+    ) -> RegistrationStatus | Coroutine[Any, Any, RegistrationStatus]:
+        """Poll registration status (sync or async)."""
+        return _sync_or_async(
+            self.poll_until_complete_async(
+                hl_address,
+                interval_seconds=interval_seconds,
+                timeout_seconds=timeout_seconds,
+                on_status=on_status,
             )
         )

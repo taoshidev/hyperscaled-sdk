@@ -191,3 +191,20 @@ class InvalidMinerError(HyperscaledError):
     def __init__(self, message: str, *, slug: str) -> None:
         self.slug = slug
         super().__init__(message)
+
+
+class RegistrationPollTimeoutError(RegistrationError):
+    """Registration polling exceeded the configured timeout."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        hl_address: str,
+        last_status: str,
+        elapsed_seconds: float,
+    ) -> None:
+        self.hl_address = hl_address
+        self.last_status = last_status
+        self.elapsed_seconds = elapsed_seconds
+        super().__init__(message)

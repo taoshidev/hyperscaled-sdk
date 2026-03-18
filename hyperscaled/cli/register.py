@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json as _json
 from typing import cast
 
 import typer
@@ -16,6 +17,7 @@ from hyperscaled.exceptions import (
     InvalidMinerError,
     PaymentError,
     RegistrationError,
+    RegistrationPollTimeoutError,
     UnsupportedAccountSizeError,
 )
 from hyperscaled.models import EntityMiner, RegistrationStatus
@@ -59,14 +61,15 @@ def _render_miner_pricing(miner: EntityMiner) -> Panel:
     return Panel(table, title=f"{miner.name} — Pricing", border_style="cyan")
 
 
-def _render_result(result: RegistrationStatus) -> Panel:
-    """Build a Rich panel showing the purchase result."""
-    lines = [
-        f"[bold]Status:[/bold]          {result.status}",
-        f"[bold]Account Size:[/bold]    ${result.account_size:,}",
-    ]
+def _render_result(result: RegistrationStatus, *, title: str = "Registration Result") -> Panel:
+    """Build a Rich panel showing a registration result."""
+    lines = [f"[bold]Status:[/bold]          {result.status}"]
+    if result.hl_address:
+        lines.append(f"[bold]HL Address:[/bold]      {result.hl_address}")
+    if result.account_size is not None:
+        lines.append(f"[bold]Account Size:[/bold]    ${result.account_size:,}")
     if result.registration_id:
-        lines.insert(1, f"[bold]Registration ID:[/bold] {result.registration_id}")
+        lines.append(f"[bold]Registration ID:[/bold] {result.registration_id}")
     if result.tx_hash:
         lines.append(f"[bold]Tx Hash:[/bold]         {result.tx_hash}")
     if result.message:
@@ -74,8 +77,8 @@ def _render_result(result: RegistrationStatus) -> Panel:
     if result.estimated_time:
         lines.append(f"[bold]Estimated Time:[/bold] {result.estimated_time}")
 
-    style = "green" if result.status == "registered" else "yellow"
-    return Panel("\n".join(lines), title="Registration Result", border_style=style)
+    style = "green" if result.is_success else ("red" if result.status == "failed" else "yellow")
+    return Panel("\n".join(lines), title=title, border_style=style)
 
 
 def _run_purchase(
@@ -188,6 +191,83 @@ def purchase(
 
 
 @app.command("status")
-def status() -> None:
-    """Check registration status."""
-    typer.echo("Not yet implemented — target: Sprint 05 (SDK-008)")
+def status(
+    hl_wallet: str | None = typer.Option(None, "--hl-wallet", help="Hyperliquid wallet address"),
+    poll: bool = typer.Option(True, "--poll/--no-poll", help="Poll until terminal state"),
+    interval: float = typer.Option(5.0, "--interval", help="Seconds between poll attempts"),
+    timeout: float = typer.Option(300.0, "--timeout", help="Max seconds to poll"),
+    json_output: bool = typer.Option(False, "--json", help="Output raw JSON"),
+) -> None:
+    """Check registration status for an HL wallet."""
+    client = HyperscaledClient()
+    resolved = _resolve_wallet_or_exit(client, hl_wallet)
+
+    if poll:
+        _run_status_poll(client, resolved, interval, timeout, json_output)
+    else:
+        _run_status_check(client, resolved, json_output)
+
+
+def _run_status_check(client: HyperscaledClient, hl_address: str, json_output: bool) -> None:
+    try:
+        result = cast(
+            RegistrationStatus,
+            client.register.check_status(hl_address),
+        )
+    except RegistrationError as exc:
+        console.print(f"[red]Error:[/red] {exc.message}")
+        raise typer.Exit(code=1) from None
+
+    if json_output:
+        console.print(_json.dumps(result.model_dump(exclude_none=True), indent=2))
+    else:
+        console.print(_render_result(result, title="Registration Status"))
+
+    if result.status == "failed":
+        raise typer.Exit(code=1) from None
+
+
+def _run_status_poll(
+    client: HyperscaledClient,
+    hl_address: str,
+    interval: float,
+    timeout: float,
+    json_output: bool,
+) -> None:
+    poll_count = 0
+
+    def _on_status(status: RegistrationStatus) -> None:
+        nonlocal poll_count
+        poll_count += 1
+        if not json_output:
+            console.print(
+                f"  [dim]\\[poll {poll_count}][/dim] status: [bold]{status.status}[/bold]"
+            )
+
+    if not json_output:
+        console.print(f"Polling registration status for [cyan]{hl_address}[/cyan] ...")
+
+    try:
+        result = cast(
+            RegistrationStatus,
+            client.register.poll_until_complete(
+                hl_address,
+                interval_seconds=interval,
+                timeout_seconds=timeout,
+                on_status=_on_status,
+            ),
+        )
+    except RegistrationPollTimeoutError as exc:
+        console.print(f"[yellow]Timeout:[/yellow] {exc.message}")
+        raise typer.Exit(code=2) from None
+    except RegistrationError as exc:
+        console.print(f"[red]Error:[/red] {exc.message}")
+        raise typer.Exit(code=1) from None
+
+    if json_output:
+        console.print(_json.dumps(result.model_dump(exclude_none=True), indent=2))
+    else:
+        console.print(_render_result(result, title="Registration Complete"))
+
+    if result.status == "failed":
+        raise typer.Exit(code=1) from None

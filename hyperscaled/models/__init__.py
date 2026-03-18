@@ -8,7 +8,11 @@ from hyperscaled.models.account import (
 )
 from hyperscaled.models.miner import EntityMiner, PricingTier, ProfitSplit
 from hyperscaled.models.payout import Payout
-from hyperscaled.models.registration import RegistrationStatus
+from hyperscaled.models.registration import (
+    SUCCESS_STATUSES,
+    TERMINAL_STATUSES,
+    RegistrationStatus,
+)
 from hyperscaled.models.rules import Rule, RuleViolation, TradeValidation
 from hyperscaled.models.trading import ClosedPosition, Order, Position
 
@@ -25,6 +29,8 @@ __all__ = [
     "PricingTier",
     "ProfitSplit",
     "RegistrationStatus",
+    "SUCCESS_STATUSES",
+    "TERMINAL_STATUSES",
     "Rule",
     "RuleViolation",
     "TradeValidation",
