@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import uuid
 from collections.abc import Coroutine
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -120,7 +119,7 @@ class RegisterClient:
         hl_wallet: str,
         payout_wallet: str | None = None,
         *,
-        email: str | None = None,
+        email: str,
         private_key: str | None = None,
     ) -> RegistrationStatus:
         """Execute the full registration purchase flow.
@@ -140,10 +139,12 @@ class RegisterClient:
                 "-- expected format 0x followed by 40 hex chars"
             )
 
-        effective_payout = payout_wallet or hl_wallet
-        if not self._client.account.validate_wallet(effective_payout):
+        if not email.strip():
+            raise ValueError("Email is required for registration.")
+
+        if payout_wallet and not self._client.account.validate_wallet(payout_wallet):
             raise ValueError(
-                f"Invalid payout wallet address: {effective_payout!r} "
+                f"Invalid payout wallet address: {payout_wallet!r} "
                 "-- expected format 0x followed by 40 hex chars"
             )
 
@@ -173,11 +174,11 @@ class RegisterClient:
             "minerSlug": miner_slug,
             "hlAddress": hl_wallet,
             "accountSize": account_size,
-            "payoutAddress": effective_payout,
+            "email": email,
             "tierIndex": tier_index,
         }
-        if email:
-            body["email"] = email
+        if payout_wallet:
+            body["payoutAddress"] = payout_wallet
 
         try:
             initial_resp = await self._client.http.post("/api/register", json=body)
@@ -215,7 +216,6 @@ class RegisterClient:
         data = paid_resp.json()
         return RegistrationStatus(
             status=data.get("status", "pending"),
-            registration_id=data.get("registrationId", str(uuid.uuid4())),
             account_size=account_size,
             tx_hash=data.get("txHash"),
             message=data.get("message"),
@@ -228,7 +228,7 @@ class RegisterClient:
         hl_wallet: str,
         payout_wallet: str | None = None,
         *,
-        email: str | None = None,
+        email: str,
         private_key: str | None = None,
     ) -> RegistrationStatus | Coroutine[Any, Any, RegistrationStatus]:
         """Purchase a funded account (sync or async)."""

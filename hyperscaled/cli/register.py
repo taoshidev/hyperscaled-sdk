@@ -63,9 +63,10 @@ def _render_result(result: RegistrationStatus) -> Panel:
     """Build a Rich panel showing the purchase result."""
     lines = [
         f"[bold]Status:[/bold]          {result.status}",
-        f"[bold]Registration ID:[/bold] {result.registration_id}",
         f"[bold]Account Size:[/bold]    ${result.account_size:,}",
     ]
+    if result.registration_id:
+        lines.insert(1, f"[bold]Registration ID:[/bold] {result.registration_id}")
     if result.tx_hash:
         lines.append(f"[bold]Tx Hash:[/bold]         {result.tx_hash}")
     if result.message:
@@ -89,8 +90,13 @@ def _run_purchase(
     # Resolve HL wallet
     resolved_hl = _resolve_wallet_or_exit(client, hl_wallet)
 
-    # Resolve payout wallet (default to HL wallet)
-    resolved_payout = payout_wallet or client.config.wallet.payout_address or resolved_hl
+    if not email:
+        console.print("[red]Error:[/red] Email is required for registration.")
+        raise typer.Exit(code=1) from None
+
+    # Use configured payout wallet when available; otherwise omit it so the backend
+    # can default to the x402 payer address.
+    resolved_payout = payout_wallet or client.config.wallet.payout_address or None
 
     # Fetch and display miner pricing
     try:
@@ -143,7 +149,7 @@ def register(
     size: int | None = typer.Option(None, "--size", help="Funded account size"),
     hl_wallet: str | None = typer.Option(None, "--hl-wallet", help="Hyperliquid wallet address"),
     payout_wallet: str | None = typer.Option(
-        None, "--payout-wallet", help="Payout wallet address (defaults to HL wallet)"
+        None, "--payout-wallet", help="Payout wallet address (defaults to x402 payer wallet)"
     ),
     email: str | None = typer.Option(None, "--email", help="Email for registration confirmation"),
 ) -> None:
@@ -167,9 +173,9 @@ def purchase(
     size: int = typer.Option(..., help="Funded account size"),
     hl_wallet: str | None = typer.Option(None, "--hl-wallet", help="Hyperliquid wallet address"),
     payout_wallet: str | None = typer.Option(
-        None, "--payout-wallet", help="Payout wallet address (defaults to HL wallet)"
+        None, "--payout-wallet", help="Payout wallet address (defaults to x402 payer wallet)"
     ),
-    email: str | None = typer.Option(None, "--email", help="Email for registration confirmation"),
+    email: str = typer.Option(..., "--email", help="Email for registration confirmation"),
 ) -> None:
     """Purchase a funded trading account via x402 payment."""
     _run_purchase(

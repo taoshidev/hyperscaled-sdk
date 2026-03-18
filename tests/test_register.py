@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
@@ -29,19 +30,11 @@ VALID_ADDRESS_2 = "0x" + "b2" * 20
 _MINER_PAYLOAD = {
     "name": "Vanta Trading",
     "slug": "vanta",
-    "payout_cadence": "weekly",
-    "available_account_sizes": [25_000, 50_000],
-    "pricing_tiers": [
-        {
-            "account_size": 25_000,
-            "cost": "150.00",
-            "profit_split": {"trader_pct": 80, "miner_pct": 20},
-        },
-        {
-            "account_size": 50_000,
-            "cost": "250.00",
-            "profit_split": {"trader_pct": 80, "miner_pct": 20},
-        },
+    "color": "#3b82f6",
+    "payoutCadenceDays": 7,
+    "tiers": [
+        {"accountSize": 25_000, "priceUsdc": 150, "profitSplit": 80},
+        {"accountSize": 50_000, "priceUsdc": 250, "profitSplit": 80},
     ],
 }
 
@@ -92,13 +85,13 @@ def _mock_handler(request: httpx.Request) -> httpx.Response:
     if path == "/info" or request.url.host == "api.hyperliquid.xyz":
         return httpx.Response(200, json=_BALANCE_RESPONSE)
 
-    if "/api/v1/miners/" in path:
-        slug = path.rsplit("/", 1)[-1]
-        if slug == "vanta":
-            return httpx.Response(200, json=_MINER_PAYLOAD)
-        return httpx.Response(404, json={"error": "not found"})
+    if path == "/api/entity":
+        return httpx.Response(200, json=[_MINER_PAYLOAD])
 
     if path == "/api/register":
+        body = json.loads(request.content.decode())
+        if not body.get("email"):
+            return httpx.Response(400, json={"error": "Missing required fields"})
         has_payment = request.headers.get("payment-signature")
         if has_payment:
             return httpx.Response(200, json=_REGISTER_200_BODY)
@@ -114,7 +107,9 @@ class TestRegisterClient:
         client = _make_client(tmp_path, monkeypatch, httpx.MockTransport(_mock_handler))
 
         with pytest.raises(ValueError, match="Invalid HL wallet"):
-            await client.register.purchase_async("vanta", 25_000, "bad-wallet", private_key="0xkey")
+            await client.register.purchase_async(
+                "vanta", 25_000, "bad-wallet", email="user@example.com", private_key="0xkey"
+            )
 
         await client.close()
 
@@ -125,7 +120,12 @@ class TestRegisterClient:
 
         with pytest.raises(ValueError, match="Invalid payout wallet"):
             await client.register.purchase_async(
-                "vanta", 25_000, VALID_ADDRESS, "bad-payout", private_key="0xkey"
+                "vanta",
+                25_000,
+                VALID_ADDRESS,
+                "bad-payout",
+                email="user@example.com",
+                private_key="0xkey",
             )
 
         await client.close()
@@ -142,7 +142,7 @@ class TestRegisterClient:
 
         with pytest.raises(InsufficientBalanceError):
             await client.register.purchase_async(
-                "vanta", 25_000, VALID_ADDRESS, private_key="0xkey"
+                "vanta", 25_000, VALID_ADDRESS, email="user@example.com", private_key="0xkey"
             )
 
         await client.close()
@@ -154,7 +154,11 @@ class TestRegisterClient:
 
         with pytest.raises(InvalidMinerError, match="not found"):
             await client.register.purchase_async(
-                "nonexistent", 25_000, VALID_ADDRESS, private_key="0xkey"
+                "nonexistent",
+                25_000,
+                VALID_ADDRESS,
+                email="user@example.com",
+                private_key="0xkey",
             )
 
         await client.close()
@@ -166,7 +170,7 @@ class TestRegisterClient:
 
         with pytest.raises(UnsupportedAccountSizeError, match="100,000"):
             await client.register.purchase_async(
-                "vanta", 100_000, VALID_ADDRESS, private_key="0xkey"
+                "vanta", 100_000, VALID_ADDRESS, email="user@example.com", private_key="0xkey"
             )
 
         await client.close()
@@ -178,7 +182,24 @@ class TestRegisterClient:
         client = _make_client(tmp_path, monkeypatch, httpx.MockTransport(_mock_handler))
 
         with pytest.raises(PaymentError, match="No Base private key"):
-            await client.register.purchase_async("vanta", 25_000, VALID_ADDRESS)
+            await client.register.purchase_async(
+                "vanta",
+                25_000,
+                VALID_ADDRESS,
+                email="user@example.com",
+            )
+
+        await client.close()
+
+    async def test_purchase_fails_missing_email(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = _make_client(tmp_path, monkeypatch, httpx.MockTransport(_mock_handler))
+
+        with pytest.raises(ValueError, match="Email is required"):
+            await client.register.purchase_async(
+                "vanta", 25_000, VALID_ADDRESS, email="", private_key="0xkey"
+            )
 
         await client.close()
 
@@ -191,15 +212,54 @@ class TestRegisterClient:
         monkeypatch.setattr(client.register, "_sign_payment", lambda reqs, key: "test-signature")
 
         result = await client.register.purchase_async(
-            "vanta", 25_000, VALID_ADDRESS, private_key="0xfakekey"
+            "vanta",
+            25_000,
+            VALID_ADDRESS,
+            email="user@example.com",
+            private_key="0xfakekey",
         )
 
         assert isinstance(result, RegistrationStatus)
         assert result.status == "registered"
+        assert result.registration_id is None
         assert result.tx_hash == "0xabc123"
         assert result.message == "Your trading account has been created."
         assert result.account_size == 25_000
 
+        await client.close()
+
+    async def test_purchase_omits_payout_wallet_when_not_provided(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen_bodies: list[dict[str, Any]] = []
+
+        def capture_handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "api.hyperliquid.xyz":
+                return httpx.Response(200, json=_BALANCE_RESPONSE)
+            if request.url.path == "/api/entity":
+                return httpx.Response(200, json=[_MINER_PAYLOAD])
+            if request.url.path == "/api/register":
+                body = json.loads(request.content.decode())
+                seen_bodies.append(body)
+                if request.headers.get("payment-signature"):
+                    return httpx.Response(200, json=_REGISTER_200_BODY)
+                return httpx.Response(402, json=_REGISTER_402_BODY)
+            return httpx.Response(404, json={"error": "unknown"})
+
+        client = _make_client(tmp_path, monkeypatch, httpx.MockTransport(capture_handler))
+        monkeypatch.setattr(client.register, "_sign_payment", lambda reqs, key: "test-signature")
+
+        await client.register.purchase_async(
+            "vanta",
+            25_000,
+            VALID_ADDRESS,
+            email="user@example.com",
+            private_key="0xfakekey",
+        )
+
+        assert len(seen_bodies) == 2
+        assert "payoutAddress" not in seen_bodies[0]
+        assert seen_bodies[0]["email"] == "user@example.com"
         await client.close()
 
     async def test_purchase_payment_settlement_failure(
@@ -226,7 +286,11 @@ class TestRegisterClient:
 
         with pytest.raises(RegistrationError, match="500"):
             await client.register.purchase_async(
-                "vanta", 25_000, VALID_ADDRESS, private_key="0xfakekey"
+                "vanta",
+                25_000,
+                VALID_ADDRESS,
+                email="user@example.com",
+                private_key="0xfakekey",
             )
 
         await client.close()
@@ -239,7 +303,13 @@ class TestRegisterClient:
 
         result = cast(
             RegistrationStatus,
-            client.register.purchase("vanta", 25_000, VALID_ADDRESS, private_key="0xfakekey"),
+            client.register.purchase(
+                "vanta",
+                25_000,
+                VALID_ADDRESS,
+                email="user@example.com",
+                private_key="0xfakekey",
+            ),
         )
 
         assert result.status == "registered"
@@ -317,7 +387,17 @@ class TestRegisterCLI:
 
         result = runner.invoke(
             app,
-            ["register", "--miner", "vanta", "--size", "100000", "--hl-wallet", "bad"],
+            [
+                "register",
+                "--miner",
+                "vanta",
+                "--size",
+                "100000",
+                "--hl-wallet",
+                "bad",
+                "--email",
+                "user@example.com",
+            ],
         )
 
         assert result.exit_code == 1
@@ -328,7 +408,10 @@ class TestRegisterCLI:
     ) -> None:
         monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
 
-        result = runner.invoke(app, ["register", "--miner", "vanta", "--size", "100000"])
+        result = runner.invoke(
+            app,
+            ["register", "--miner", "vanta", "--size", "100000", "--email", "user@example.com"],
+        )
 
         assert result.exit_code == 1
         assert "No Hyperliquid wallet configured" in result.output
@@ -353,7 +436,7 @@ class TestRegisterCLI:
 
         result = runner.invoke(
             app,
-            ["register", "--miner", "vanta", "--size", "25000"],
+            ["register", "--miner", "vanta", "--size", "25000", "--email", "user@example.com"],
             input="y\n",
         )
 
@@ -388,6 +471,8 @@ class TestRegisterCLI:
                 "25000",
                 "--hl-wallet",
                 VALID_ADDRESS,
+                "--email",
+                "user@example.com",
             ],
             input="y\n",
         )
@@ -422,6 +507,8 @@ class TestRegisterCLI:
                 "50000",
                 "--hl-wallet",
                 VALID_ADDRESS,
+                "--email",
+                "user@example.com",
             ],
             input="y\n",
         )
@@ -458,6 +545,8 @@ class TestRegisterCLI:
                 "25000",
                 "--hl-wallet",
                 VALID_ADDRESS,
+                "--email",
+                "user@example.com",
             ],
             input="y\n",
         )
@@ -486,6 +575,8 @@ class TestRegisterCLI:
                 "25000",
                 "--hl-wallet",
                 VALID_ADDRESS,
+                "--email",
+                "user@example.com",
             ],
             input="y\n",
         )
@@ -516,6 +607,8 @@ class TestRegisterCLI:
                 "25000",
                 "--hl-wallet",
                 VALID_ADDRESS,
+                "--email",
+                "user@example.com",
             ],
             input="y\n",
         )
