@@ -10,6 +10,7 @@ import pytest
 
 from hyperscaled.exceptions import HyperscaledError
 from hyperscaled.models.account import BalanceStatus
+from hyperscaled.models.rules import TradeValidation
 from hyperscaled.models.trading import Order
 from hyperscaled.sdk.client import HyperscaledClient
 from hyperscaled.sdk.pairs import normalize_pair_to_hl, normalize_pair_to_vanta, validate_pair
@@ -89,6 +90,10 @@ def trading_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Hyperscal
         return BalanceStatus(balance=Decimal("1000"), meets_minimum=True)
 
     client.account.check_balance_async = mock_balance  # type: ignore[assignment]
+    client.rules = MagicMock()
+    client.rules.validate_trade_async = AsyncMock(
+        return_value=TradeValidation(valid=True, violations=[])
+    )
 
     return client
 
@@ -123,9 +128,9 @@ class TestPairUtilities:
 
 class TestInputValidation:
     async def test_submit_invalid_pair(self, trading_client: HyperscaledClient) -> None:
-        with pytest.raises(ValueError, match="Unsupported pair"):
+        with pytest.raises(ValueError, match="Pair must be a non-empty string"):
             await trading_client.trade.submit_async(
-                pair="LINK-USDC", side="long", size=Decimal("0.01"), order_type="market"
+                pair=" ", side="long", size=Decimal("0.01"), order_type="market"
             )
 
     async def test_submit_invalid_side(self, trading_client: HyperscaledClient) -> None:

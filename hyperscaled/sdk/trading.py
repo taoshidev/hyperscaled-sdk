@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 from hyperscaled.exceptions import HyperscaledError
 from hyperscaled.models.trading import Order
-from hyperscaled.sdk.pairs import SUPPORTED_PAIRS, normalize_pair_to_hl, validate_pair
+from hyperscaled.sdk.pairs import SUPPORTED_PAIRS, normalize_pair_to_hl
 
 if TYPE_CHECKING:
     from hyperscaled.sdk.client import HyperscaledClient
@@ -127,7 +127,14 @@ class TradingClient:
         order_type: str,
         price: Decimal | None,
     ) -> None:
-        """Pre-submission validation hook. No-op until SDK-012."""
+        """Run validator-backed pre-submission checks before any HL call."""
+        await self._client.rules.validate_trade_async(
+            pair=pair,
+            side=side,
+            size=size,
+            order_type=order_type,
+            price=price,
+        )
 
     async def submit_async(
         self,
@@ -141,7 +148,8 @@ class TradingClient:
     ) -> Order:
         """Submit an order and return translated funded-account execution info."""
         # ── Input validation ──────────────────────────────────
-        validate_pair(pair)
+        if not pair.strip():
+            raise ValueError("Pair must be a non-empty string")
 
         if side not in ("long", "short"):
             raise ValueError(f"Invalid side {side!r} — must be 'long' or 'short'")
@@ -157,9 +165,6 @@ class TradingClient:
         if order_type == "market" and price is not None:
             raise ValueError("Price must not be provided for market orders")
 
-        # ── Pre-validation seam (SDK-012) ─────────────────────
-        await self._pre_validate(pair, side, size, order_type, price)
-
         # ── Funded account size ───────────────────────────────
         funded_account_size = self._client.config.account.funded_account_size
         if funded_account_size <= 0:
@@ -168,6 +173,12 @@ class TradingClient:
                 "Complete registration first via `client.register.purchase()` "
                 "or set account.funded_account_size in config."
             )
+
+        # ── Local config preconditions ────────────────────────
+        _ = self._client._resolve_hl_private_key()
+
+        # ── Pre-validation seam (SDK-012) ─────────────────────
+        await self._pre_validate(pair, side, size, order_type, price)
 
         # ── Live HL balance ───────────────────────────────────
         balance_status = await self._client.account.check_balance_async()

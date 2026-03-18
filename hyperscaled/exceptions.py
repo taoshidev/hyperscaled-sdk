@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
 
 class HyperscaledError(Exception):
@@ -24,11 +25,25 @@ class RuleViolationError(HyperscaledError):
         rule_id: str,
         limit: str,
         actual_value: str,
+        code: str | None = None,
+        context: dict[str, Any] | None = None,
     ) -> None:
         self.rule_id = rule_id
         self.limit = limit
         self.actual_value = actual_value
+        self.code = code or rule_id
+        self.context = context or {}
         super().__init__(message)
+
+    @property
+    def current_value(self) -> str:
+        """Compatibility alias for newer rule payload naming."""
+        return self.actual_value
+
+    @property
+    def allowed_value(self) -> str:
+        """Compatibility alias for newer rule payload naming."""
+        return self.limit
 
 
 class UnsupportedPairError(RuleViolationError):
@@ -46,6 +61,22 @@ class UnsupportedPairError(RuleViolationError):
     ) -> None:
         self.pair = pair
         self.supported_pairs = supported_pairs
+        super().__init__(message, rule_id=rule_id, limit=limit, actual_value=actual_value)
+
+
+class TemporarilyHaltedPairError(RuleViolationError):
+    """Trade pair exists but is not currently allowed for trading."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        rule_id: str,
+        limit: str,
+        actual_value: str,
+        pair: str,
+    ) -> None:
+        self.pair = pair
         super().__init__(message, rule_id=rule_id, limit=limit, actual_value=actual_value)
 
 

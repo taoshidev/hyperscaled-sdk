@@ -189,6 +189,21 @@ class HyperscaledClient:
     def trade(self, value: Any) -> None:
         self._trade = value
 
+    @property
+    def rules(self) -> Any:
+        """The lazy-loaded rules client."""
+        cached = getattr(self, "_rules", None)
+        if cached is None:
+            from hyperscaled.sdk.rules import RulesClient
+
+            cached = RulesClient(self)
+            self._rules = cached
+        return cached
+
+    @rules.setter
+    def rules(self, value: Any) -> None:
+        self._rules = value
+
     def _resolve_hl_private_key(self) -> str:
         """Return the HL private key from constructor param or environment."""
         resolved = self._hl_private_key or os.environ.get("HYPERSCALED_HL_PRIVATE_KEY", "")

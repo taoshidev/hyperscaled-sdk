@@ -14,6 +14,7 @@ from hyperscaled.exceptions import (
     LeverageLimitError,
     OrderFrequencyError,
     RuleViolationError,
+    TemporarilyHaltedPairError,
     UnsupportedPairError,
 )
 
@@ -63,6 +64,25 @@ class TestUnsupportedPairError:
         )
         assert err.pair == "LINK-USDC"
         assert err.supported_pairs == ["BTC-USDC"]
+
+
+class TestTemporarilyHaltedPairError:
+    def test_inherits_rule_violation(self) -> None:
+        err = TemporarilyHaltedPairError(
+            "BTC-USDC halted",
+            **_RULE_KWARGS,
+            pair="BTC-USDC",
+        )
+        assert isinstance(err, RuleViolationError)
+        assert isinstance(err, HyperscaledError)
+
+    def test_fields(self) -> None:
+        err = TemporarilyHaltedPairError(
+            "halted",
+            **_RULE_KWARGS,
+            pair="BTC-USDC",
+        )
+        assert err.pair == "BTC-USDC"
 
 
 class TestLeverageLimitError:

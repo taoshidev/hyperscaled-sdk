@@ -88,12 +88,17 @@ def submit(
     price: float | None = typer.Option(None, help="Limit price (required for limit orders)"),
     take_profit: float | None = typer.Option(None, "--tp", help="Take profit price"),
     stop_loss: float | None = typer.Option(None, "--sl", help="Stop loss price"),
+    strict: bool = typer.Option(
+        False,
+        "--strict",
+        help="Exit with code 1 on local rule violations without extra formatting.",
+    ),
 ) -> None:
     """Submit a trade on Hyperliquid."""
     from decimal import Decimal
 
     from hyperscaled import HyperscaledClient
-    from hyperscaled.exceptions import HyperscaledError
+    from hyperscaled.exceptions import HyperscaledError, RuleViolationError
 
     client = HyperscaledClient()
     client.open_sync()
@@ -109,7 +114,10 @@ def submit(
         )
         _render_order(order)  # type: ignore[arg-type]
     except (ValueError, HyperscaledError) as exc:
-        console.print(f"[red]Error:[/red] {exc}")
+        if strict and isinstance(exc, RuleViolationError):
+            console.print(str(exc))
+        else:
+            console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(code=1) from None
     finally:
         client.close_sync()

@@ -13,6 +13,7 @@ from hyperscaled.sdk.client import HyperscaledClient, _run_sync
 from hyperscaled.sdk.config import Config, WalletConfig
 from hyperscaled.sdk.miners import MinersClient
 from hyperscaled.sdk.register import RegisterClient
+from hyperscaled.sdk.rules import RulesClient
 from hyperscaled.sdk.trading import TradingClient
 
 VALID_ADDRESS = "0x" + "a1" * 20
@@ -168,7 +169,6 @@ class TestLazySubClients:
         ("portfolio", "Sprint 06"),
         ("payouts", "Sprint 06"),
         ("kyc", "Sprint 06"),
-        ("rules", "Sprint 06"),
         ("data", "Phase 2"),
         ("backtest", "Phase 2"),
     ]
@@ -234,6 +234,8 @@ class TestLazySubClients:
         assert client.register is sentinel
         client.trade = sentinel
         assert client.trade is sentinel
+        client.rules = sentinel
+        assert client.rules is sentinel
 
     def test_sub_client_cached(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
@@ -241,6 +243,16 @@ class TestLazySubClients:
         sentinel = object()
         client.miners = sentinel
         assert client.miners is client.miners
+
+    def test_rules_lazy_loaded(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
+        client = HyperscaledClient()
+        assert getattr(client, "_rules", None) is None
+
+        rules = client.rules
+
+        assert isinstance(rules, RulesClient)
+        assert client._rules is rules
 
 
 # ── HTTP session recreation after close ──────────────────────
