@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
@@ -622,8 +623,16 @@ class TestRegisterCLI:
 
 _STATUS_ACTIVE = {"status": "active", "hl_address": VALID_ADDRESS}
 _STATUS_PENDING = {"status": "pending", "hl_address": VALID_ADDRESS}
+_STATUS_PROCESSING = {"status": "processing", "hl_address": VALID_ADDRESS}
 _STATUS_NOT_FOUND = {"status": "not_found", "hl_address": VALID_ADDRESS}
 _STATUS_FAILED = {"status": "failed", "hl_address": VALID_ADDRESS}
+_STATUS_ELIMINATED = {"status": "eliminated", "hl_address": VALID_ADDRESS}
+_STATUS_REGISTERED_WITH_ACCOUNT = {
+    "status": "registered",
+    "hl_address": VALID_ADDRESS,
+    "funded_account_id": "fa_123",
+    "account_size": 100_000,
+}
 
 
 def _status_handler(
@@ -690,6 +699,17 @@ class TestCheckStatus:
         assert result.is_terminal is False
         await client.close()
 
+    async def test_check_status_processing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = _make_client(tmp_path, monkeypatch, _status_handler(_STATUS_PROCESSING))
+        result = await client.register.check_status_async(VALID_ADDRESS)
+
+        assert result.status == "processing"
+        assert result.is_terminal is False
+        assert result.is_success is False
+        await client.close()
+
     async def test_check_status_failed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -699,6 +719,33 @@ class TestCheckStatus:
         assert result.status == "failed"
         assert result.is_terminal is True
         assert result.is_success is False
+        await client.close()
+
+    async def test_check_status_eliminated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = _make_client(tmp_path, monkeypatch, _status_handler(_STATUS_ELIMINATED))
+        result = await client.register.check_status_async(VALID_ADDRESS)
+
+        assert result.status == "eliminated"
+        assert result.is_terminal is True
+        assert result.is_success is False
+        await client.close()
+
+    async def test_check_status_persists_funded_account_id_when_present(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = _make_client(
+            tmp_path,
+            monkeypatch,
+            _status_handler(_STATUS_REGISTERED_WITH_ACCOUNT),
+        )
+        result = await client.register.check_status_async(VALID_ADDRESS)
+
+        assert result.status == "registered"
+        assert result.funded_account_id == "fa_123"
+        assert result.account_size == 100_000
+        assert client.config.account.funded_account_id == "fa_123"
         await client.close()
 
     async def test_check_status_rejects_invalid_wallet(
@@ -829,6 +876,25 @@ class TestPollUntilComplete:
 
         assert exc_info.value.hl_address == VALID_ADDRESS
         assert exc_info.value.last_status == "pending"
+        await client.close()
+
+    async def test_poll_timeout_caps_sleep_to_remaining_time(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = _make_client(tmp_path, monkeypatch, _status_handler(_STATUS_PENDING))
+        start = time.perf_counter()
+
+        with pytest.raises(RegistrationPollTimeoutError, match="timed out") as exc_info:
+            await client.register.poll_until_complete_async(
+                VALID_ADDRESS,
+                interval_seconds=0.5,
+                timeout_seconds=0.05,
+            )
+
+        elapsed = time.perf_counter() - start
+
+        assert elapsed < 0.2
+        assert exc_info.value.elapsed_seconds < 0.2
         await client.close()
 
     def test_poll_sync(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1016,6 +1082,25 @@ class TestStatusCLI:
 
         assert result.exit_code == 1
         assert "Could not reach validator" in result.output
+
+    def test_status_no_poll_eliminated_exits_nonzero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
+
+        reg_client = _FakeRegisterClientWithStatus(
+            status_result=RegistrationStatus(status="eliminated", hl_address=VALID_ADDRESS),
+        )
+        fake = _FakeClientWithStatus(reg_client)
+        monkeypatch.setattr("hyperscaled.cli.register.HyperscaledClient", lambda: fake)
+
+        result = runner.invoke(
+            app,
+            ["register", "status", "--hl-wallet", VALID_ADDRESS, "--no-poll"],
+        )
+
+        assert result.exit_code == 1
+        assert "eliminated" in result.output
 
     def test_status_uses_configured_wallet(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

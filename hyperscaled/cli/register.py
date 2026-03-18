@@ -77,8 +77,13 @@ def _render_result(result: RegistrationStatus, *, title: str = "Registration Res
     if result.estimated_time:
         lines.append(f"[bold]Estimated Time:[/bold] {result.estimated_time}")
 
-    style = "green" if result.is_success else ("red" if result.status == "failed" else "yellow")
+    style = "green" if result.is_success else ("red" if result.is_terminal else "yellow")
     return Panel("\n".join(lines), title=title, border_style=style)
+
+
+def _is_terminal_failure(result: RegistrationStatus) -> bool:
+    """Whether the result is a terminal non-success state."""
+    return result.is_terminal and not result.is_success
 
 
 def _run_purchase(
@@ -223,7 +228,7 @@ def _run_status_check(client: HyperscaledClient, hl_address: str, json_output: b
     else:
         console.print(_render_result(result, title="Registration Status"))
 
-    if result.status == "failed":
+    if _is_terminal_failure(result):
         raise typer.Exit(code=1) from None
 
 
@@ -269,5 +274,5 @@ def _run_status_poll(
     else:
         console.print(_render_result(result, title="Registration Complete"))
 
-    if result.status == "failed":
+    if _is_terminal_failure(result):
         raise typer.Exit(code=1) from None

@@ -57,6 +57,13 @@ class RegisterClient:
     def __init__(self, client: HyperscaledClient) -> None:
         self._client = client
 
+    def _persist_funded_account_id(self, funded_account_id: str | None) -> None:
+        """Persist a funded account ID when the backend provides one."""
+        if not funded_account_id:
+            return
+        self._client.config.set_value("account.funded_account_id", funded_account_id)
+        self._client.config.save()
+
     # ── Helpers ───────────────────────────────────────────────
 
     async def _resolve_tier_index(self, miner_slug: str, account_size: int) -> tuple[int, Decimal]:
@@ -286,10 +293,19 @@ class RegisterClient:
             )
 
         data = resp.json()
-        return RegistrationStatus(
+        result = RegistrationStatus(
             status=data.get("status", "pending"),
             hl_address=data.get("hl_address", hl_address),
+            registration_id=data.get("registration_id"),
+            funded_account_id=data.get("funded_account_id"),
+            account_size=data.get("account_size"),
+            estimated_time=data.get("estimated_time"),
+            tx_hash=data.get("tx_hash") or data.get("txHash"),
+            message=data.get("message"),
         )
+        if result.is_success:
+            self._persist_funded_account_id(result.funded_account_id)
+        return result
 
     def check_status(
         self, hl_address: str
@@ -338,7 +354,17 @@ class RegisterClient:
             if result.status in TERMINAL_STATUSES:
                 return result
 
-            await asyncio.sleep(interval_seconds)
+            remaining = timeout_seconds - (time.monotonic() - start)
+            if remaining <= 0:
+                raise RegistrationPollTimeoutError(
+                    f"Registration polling timed out after {timeout_seconds:.0f}s. "
+                    f"Last status: {last_status.status if last_status else 'unknown'}",
+                    hl_address=hl_address,
+                    last_status=last_status.status if last_status else "unknown",
+                    elapsed_seconds=timeout_seconds,
+                )
+
+            await asyncio.sleep(min(interval_seconds, remaining))
 
     def poll_until_complete(
         self,
