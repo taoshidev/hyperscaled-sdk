@@ -13,6 +13,7 @@ from hyperscaled.sdk.client import HyperscaledClient, _run_sync
 from hyperscaled.sdk.config import Config, WalletConfig
 from hyperscaled.sdk.miners import MinersClient
 from hyperscaled.sdk.register import RegisterClient
+from hyperscaled.sdk.portfolio import PortfolioClient
 from hyperscaled.sdk.rules import RulesClient
 from hyperscaled.sdk.trading import TradingClient
 
@@ -166,7 +167,6 @@ class TestSyncHelpers:
 
 class TestLazySubClients:
     STUBS = [
-        ("portfolio", "Sprint 06"),
         ("payouts", "Sprint 06"),
         ("kyc", "Sprint 06"),
         ("data", "Phase 2"),
@@ -236,6 +236,8 @@ class TestLazySubClients:
         assert client.trade is sentinel
         client.rules = sentinel
         assert client.rules is sentinel
+        client.portfolio = sentinel
+        assert client.portfolio is sentinel
 
     def test_sub_client_cached(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
@@ -253,6 +255,16 @@ class TestLazySubClients:
 
         assert isinstance(rules, RulesClient)
         assert client._rules is rules
+
+    def test_portfolio_lazy_loaded(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
+        client = HyperscaledClient()
+        assert getattr(client, "_portfolio", None) is None
+
+        portfolio = client.portfolio
+
+        assert isinstance(portfolio, PortfolioClient)
+        assert client._portfolio is portfolio
 
 
 # ── HTTP session recreation after close ──────────────────────

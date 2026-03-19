@@ -10,17 +10,24 @@ from pydantic import BaseModel
 
 
 class Order(BaseModel):
-    """A trade order placed through the Hyperscaled SDK."""
+    """A trade order placed or read through the Hyperscaled SDK.
 
-    hl_order_id: str
+    Supports both the write path (trade submission, where ``hl_order_id`` and
+    ``scaling_ratio`` are populated) and the read path (portfolio queries,
+    where ``order_id`` and ``limit_price`` are populated instead).
+    """
+
+    hl_order_id: str | None = None
+    order_id: str | None = None
     pair: str
     side: Literal["long", "short"]
-    size: Decimal
-    funded_equivalent_size: Decimal
+    size: Decimal | None = None
+    funded_equivalent_size: Decimal | None = None
     order_type: Literal["market", "limit"]
-    status: Literal["filled", "partial", "pending", "cancelled"]
+    status: Literal["filled", "partial", "pending", "cancelled", "open"]
     fill_price: Decimal | None = None
-    scaling_ratio: Decimal
+    limit_price: Decimal | None = None
+    scaling_ratio: Decimal | None = None
     take_profit: Decimal | None = None
     stop_loss: Decimal | None = None
     created_at: datetime
@@ -34,7 +41,7 @@ class Position(BaseModel):
     size: Decimal
     position_value: Decimal
     entry_price: Decimal
-    mark_price: Decimal
+    mark_price: Decimal | None = None
     liquidation_price: Decimal | None = None
     unrealized_pnl: Decimal
     take_profit: Decimal | None = None

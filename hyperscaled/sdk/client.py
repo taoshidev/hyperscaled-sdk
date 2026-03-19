@@ -84,10 +84,8 @@ class HyperscaledClient:
     precedence over environment variables.
     """
 
-    portfolio = _SubClientDescriptor("PortfolioClient", "Sprint 06")
     payouts = _SubClientDescriptor("PayoutsClient", "Sprint 06")
     kyc = _SubClientDescriptor("KYCClient", "Sprint 06")
-    rules = _SubClientDescriptor("RulesClient", "Sprint 06")
     data = _SubClientDescriptor("DataClient", "Phase 2")
     backtest = _SubClientDescriptor("BacktestClient", "Phase 2")
 
@@ -203,6 +201,21 @@ class HyperscaledClient:
     @rules.setter
     def rules(self, value: Any) -> None:
         self._rules = value
+
+    @property
+    def portfolio(self) -> Any:
+        """The lazy-loaded portfolio client."""
+        cached = getattr(self, "_portfolio", None)
+        if cached is None:
+            from hyperscaled.sdk.portfolio import PortfolioClient
+
+            cached = PortfolioClient(self)
+            self._portfolio = cached
+        return cached
+
+    @portfolio.setter
+    def portfolio(self, value: Any) -> None:
+        self._portfolio = value
 
     def _resolve_hl_private_key(self) -> str:
         """Return the HL private key from constructor param or environment."""

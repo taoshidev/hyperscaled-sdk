@@ -156,6 +156,23 @@ class TestOrder:
         assert order.take_profit is None
         assert order.stop_loss is None
 
+    def test_valid_read_path_order(self) -> None:
+        order = Order(
+            order_id="order-uuid-1",
+            pair="BTC-USDC",
+            side="long",
+            order_type="limit",
+            status="open",
+            limit_price=Decimal("95000"),
+            created_at=_now(),
+        )
+        assert order.hl_order_id is None
+        assert order.size is None
+        assert order.funded_equivalent_size is None
+        assert order.scaling_ratio is None
+        assert order.limit_price == Decimal("95000")
+        assert order.status == "open"
+
     def test_invalid_side_rejected(self) -> None:
         with pytest.raises(ValidationError):
             Order(
@@ -188,6 +205,21 @@ class TestOrder:
         restored = Order.model_validate(data)
         assert restored == order
 
+    def test_json_roundtrip_read_path(self) -> None:
+        order = Order(
+            order_id="order-uuid-1",
+            pair="BTC-USDC",
+            side="long",
+            order_type="limit",
+            status="open",
+            limit_price=Decimal("95000"),
+            size=Decimal("0.01"),
+            created_at=_now(),
+        )
+        data = json.loads(order.model_dump_json())
+        restored = Order.model_validate(data)
+        assert restored == order
+
 
 # ── Position / ClosedPosition ────────────────────────────
 
@@ -206,6 +238,19 @@ class TestPosition:
         )
         assert pos.liquidation_price is None
         assert pos.unrealized_pnl == Decimal("200")
+
+    def test_valid_without_mark_price(self) -> None:
+        pos = Position(
+            symbol="BTC-USDC",
+            side="long",
+            size=Decimal("200"),
+            position_value=Decimal("20000"),
+            entry_price=Decimal("100000"),
+            unrealized_pnl=Decimal("200"),
+            open_time=_now(),
+        )
+        assert pos.mark_price is None
+        assert pos.liquidation_price is None
 
     def test_json_roundtrip(self) -> None:
         pos = Position(

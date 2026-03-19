@@ -15,6 +15,7 @@ MODULES = [
     "hyperscaled.cli.register",
     "hyperscaled.cli.trade",
     "hyperscaled.cli.positions",
+    "hyperscaled.cli.orders",
     "hyperscaled.cli.info",
     "hyperscaled.cli.kyc",
     "hyperscaled.cli.rules",
