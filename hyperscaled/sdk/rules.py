@@ -15,10 +15,11 @@ from hyperscaled.exceptions import (
     DrawdownBreachError,
     ExposureLimitError,
     HyperscaledError,
+    InsufficientBalanceError,
     LeverageLimitError,
-    TemporarilyHaltedPairError,
     UnsupportedPairError,
 )
+from hyperscaled.models.account import MINIMUM_BALANCE
 from hyperscaled.models.rules import Rule, TradeValidation
 from hyperscaled.sdk.client import _run_sync
 
@@ -28,8 +29,8 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 
 _TRADE_PAIRS_PATH = "/trade-pairs"
-_HL_DASHBOARD_PATH = "/hl/{hl_address}/dashboard"
-_HL_INFO_URL = "https://api.hyperliquid.xyz/info"
+_HL_DASHBOARD_PATH = "/hl-traders/{hl_address}"
+_HL_INFO_URL_DEFAULT = "https://api.hyperliquid.xyz/info"
 _PORTFOLIO_LEVERAGE_CAP: dict[str, Decimal] = {
     "crypto": Decimal("5"),
     "forex": Decimal("20"),
@@ -47,6 +48,7 @@ _RULE_IDS = {
     "exposure_limit": "SDK012_EXPOSURE_LIMIT",
     "drawdown_breach": "SDK012_DRAWDOWN_BREACH",
     "account_status": "SDK012_ACCOUNT_STATUS",
+    "insufficient_balance": "SDK012_INSUFFICIENT_BALANCE",
 }
 
 
@@ -128,7 +130,7 @@ class RulesClient:
     async def _fetch_trade_pairs(self) -> list[dict[str, Any]]:
         """Return the validator's currently allowed trade pairs."""
         try:
-            response = await self._client.http.get(_TRADE_PAIRS_PATH)
+            response = await self._client.validator_http.get(_TRADE_PAIRS_PATH)
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             raise HyperscaledError(
@@ -147,13 +149,17 @@ class RulesClient:
         """Fetch validator dashboard data for the configured HL wallet."""
         path = _HL_DASHBOARD_PATH.format(hl_address=hl_address)
         try:
-            response = await self._client.http.get(path)
+            response = await self._client.validator_http.get(path)
         except httpx.HTTPError as exc:
             raise HyperscaledError(f"Failed to fetch validator dashboard: {exc}") from exc
 
         if response.status_code == 404:
             raise HyperscaledError(
-                "Validator dashboard not found for the configured Hyperliquid wallet."
+                f"No validator dashboard for Hyperliquid wallet {hl_address}. "
+                "That usually means this address is not registered with the validator yet, "
+                "or HYPERSCALED_VALIDATOR_API_URL points at the wrong host. "
+                "If you use HYPERSCALED_HL_PRIVATE_KEY only, ensure it matches the wallet "
+                "you registered; otherwise set HYPERSCALED_HL_ADDRESS to that registered address."
             )
 
         try:
@@ -165,10 +171,9 @@ class RulesClient:
             ) from exc
 
         payload = response.json()
-        dashboard = payload.get("dashboard")
-        if not isinstance(dashboard, dict):
-            raise HyperscaledError("Validator dashboard response missing dashboard payload")
-        return dashboard
+        if not isinstance(payload, dict) or "hl_address" not in payload:
+            raise HyperscaledError("Validator dashboard response has unexpected shape")
+        return payload
 
     async def _fetch_hl_mid_price(self, pair: dict[str, Any]) -> Decimal:
         """Fetch the current Hyperliquid mid price for a crypto pair."""
@@ -182,7 +187,8 @@ class RulesClient:
             coin = coin[:-3]
 
         try:
-            response = await self._client.http.post(_HL_INFO_URL, json={"type": "allMids"})
+            hl_info_url = self._client.config.hl_info_url
+            response = await self._client.http.post(hl_info_url, json={"type": "allMids"})
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             raise HyperscaledError(
@@ -197,14 +203,8 @@ class RulesClient:
         return _decimal(payload[coin])
 
     def _resolve_wallet(self) -> str:
-        """Return the configured Hyperliquid wallet required for dashboard reads."""
-        hl_address = self._client.config.wallet.hl_address
-        if not hl_address:
-            raise HyperscaledError(
-                "No Hyperliquid wallet configured. "
-                "Run `client.account.setup(wallet)` or `hyperscaled account setup <wallet>` first."
-            )
-        return hl_address
+        """Return the Hyperliquid wallet address for validator dashboard reads."""
+        return self._client.resolve_hl_wallet_address()
 
     def _find_allowed_pair(self, pair: str, allowed_pairs: list[dict[str, Any]]) -> dict[str, Any] | None:
         """Match a user-supplied pair against the validator's allowed-pair list."""
@@ -223,16 +223,12 @@ class RulesClient:
 
     def _assert_account_status(self, dashboard: dict[str, Any]) -> None:
         """Raise if the validator says the account is not currently tradeable."""
-        subaccount = dashboard.get("subaccount_info", {})
-        if not isinstance(subaccount, dict):
-            return
-
-        status = str(subaccount.get("status", "")).lower()
-        if status in {"", "active", "admin"}:
+        status = str(dashboard.get("status", "")).lower()
+        if status in {"", "success", "active", "admin"}:
             return
 
         if status == "eliminated":
-            challenge = dashboard.get("challenge_period", {})
+            challenge = dashboard.get("challenge_progress", {})
             current_drawdown = _decimal(
                 challenge.get("drawdown_percent")
                 if isinstance(challenge, dict)
@@ -261,7 +257,7 @@ class RulesClient:
 
     def _assert_drawdown(self, dashboard: dict[str, Any]) -> None:
         """Raise when challenge drawdown usage shows the account has already breached."""
-        challenge = dashboard.get("challenge_period", {})
+        challenge = dashboard.get("challenge_progress", {})
         if not isinstance(challenge, dict):
             return
 
@@ -281,22 +277,33 @@ class RulesClient:
     @staticmethod
     def _account_context(dashboard: dict[str, Any]) -> tuple[Decimal, Decimal, Decimal, bool]:
         """Extract funded balance, current exposure, HWM, and challenge mode."""
-        account = dashboard.get("account_size_data", {})
-        challenge = dashboard.get("challenge_period", {})
+        challenge = dashboard.get("challenge_progress", {})
+        positions = dashboard.get("positions", {})
 
-        if not isinstance(account, dict):
-            account = {}
         if not isinstance(challenge, dict):
             challenge = {}
+        if not isinstance(positions, dict):
+            positions = {}
 
-        funded_balance = _decimal(account.get("balance", account.get("account_size")))
-        current_exposure = _decimal(account.get("capital_used"))
+        account_size = _decimal(dashboard.get("account_size"))
+        funded_balance = account_size
+        total_leverage = _decimal(positions.get("total_leverage"))
+        current_exposure = account_size * total_leverage
         return (
             funded_balance,
             current_exposure,
-            _decimal(account.get("account_size")),
+            account_size,
             bool(challenge.get("bucket") == "SUBACCOUNT_CHALLENGE"),
         )
+
+    async def supported_pairs_async(self) -> list[str]:
+        """Return the list of currently supported trading pairs from the validator."""
+        allowed_pairs = await self._fetch_trade_pairs()
+        return self._pair_list_for_message(allowed_pairs)
+
+    def supported_pairs(self) -> list[str] | Coroutine[Any, Any, list[str]]:
+        """Return supported pairs synchronously or asynchronously."""
+        return _sync_or_async(self.supported_pairs_async())
 
     async def list_all_async(self) -> list[Rule]:
         """Return a structured summary of currently allowed pair and leverage rules."""
@@ -363,21 +370,13 @@ class RulesClient:
         pair_entry = self._find_allowed_pair(pair, allowed_pairs)
         if pair_entry is None:
             supported_pairs = self._pair_list_for_message(allowed_pairs)
-            normalized_pair = pair.strip().upper()
-            if normalized_pair and all(ch.isalnum() or ch in {"-", "/"} for ch in normalized_pair):
-                raise TemporarilyHaltedPairError(
-                    f"{pair} is not currently in the validator's allowed trade-pair list.",
-                    rule_id=_RULE_IDS["pair_halted"],
-                    limit="allowed_trade_pairs",
-                    actual_value=normalized_pair,
-                    pair=normalized_pair,
-                )
+            normalized_pair = pair.strip().upper() or pair
             raise UnsupportedPairError(
                 f"Unsupported pair {pair!r}. Supported pairs: {', '.join(supported_pairs)}",
                 rule_id=_RULE_IDS["pair_unsupported"],
                 limit="allowed_trade_pairs",
-                actual_value=pair,
-                pair=pair,
+                actual_value=normalized_pair,
+                pair=normalized_pair,
                 supported_pairs=supported_pairs,
             )
 
@@ -385,6 +384,19 @@ class RulesClient:
         dashboard = await self._fetch_dashboard(wallet)
         self._assert_account_status(dashboard)
         self._assert_drawdown(dashboard)
+
+        # ── HL balance minimum check ─────────────────────────
+        balance_status = await self._client.account.check_balance_async(wallet)
+        if balance_status.balance < MINIMUM_BALANCE:
+            raise InsufficientBalanceError(
+                f"Hyperliquid balance ${balance_status.balance} is below the "
+                f"${MINIMUM_BALANCE} minimum required to trade.",
+                rule_id=_RULE_IDS["insufficient_balance"],
+                limit=str(MINIMUM_BALANCE),
+                actual_value=str(balance_status.balance),
+                balance=balance_status.balance,
+                minimum_required=MINIMUM_BALANCE,
+            )
 
         funded_balance, current_exposure, _account_size, in_challenge = self._account_context(dashboard)
         if funded_balance <= 0:

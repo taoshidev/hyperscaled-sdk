@@ -4,17 +4,16 @@ from __future__ import annotations
 
 from decimal import Decimal
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from hyperscaled.exceptions import HyperscaledError
+from hyperscaled.exceptions import HyperscaledError, InsufficientBalanceError
 from hyperscaled.models.account import BalanceStatus
 from hyperscaled.models.rules import TradeValidation
 from hyperscaled.models.trading import Order
 from hyperscaled.sdk.client import HyperscaledClient
 from hyperscaled.sdk.pairs import normalize_pair_to_hl, normalize_pair_to_vanta, validate_pair
-from hyperscaled.sdk.trading import TradingClient
 
 VALID_ADDRESS = "0x" + "a1" * 20
 
@@ -389,7 +388,18 @@ class TestErrorPaths:
 
         trading_client.account.check_balance_async = zero_balance  # type: ignore[assignment]
 
-        with pytest.raises(HyperscaledError, match="balance is zero or negative"):
+        with pytest.raises(HyperscaledError, match="perps account balance is zero or negative"):
+            await trading_client.trade.submit_async(
+                pair="BTC-USDC", side="long", size=Decimal("0.01"), order_type="market"
+            )
+
+    async def test_submit_insufficient_balance(self, trading_client: HyperscaledClient) -> None:
+        async def low_balance(*_args: object, **_kwargs: object) -> BalanceStatus:
+            return BalanceStatus(balance=Decimal("500"), meets_minimum=False)
+
+        trading_client.account.check_balance_async = low_balance  # type: ignore[assignment]
+
+        with pytest.raises(InsufficientBalanceError, match="below the.*minimum"):
             await trading_client.trade.submit_async(
                 pair="BTC-USDC", side="long", size=Decimal("0.01"), order_type="market"
             )

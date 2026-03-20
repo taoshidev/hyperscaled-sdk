@@ -34,6 +34,7 @@ client = HyperscaledClient(hl_wallet="0x...", payout_wallet="0x...")
 # Inspect resolved configuration
 print(client.config.wallet.hl_address)
 print(client.config.api.hyperscaled_base_url)
+print(client.config.api.validator_api_url)  # orchestrator (e.g. purchase /api/register)
 
 # Miner catalog discovery
 for miner in client.miners.list_all():

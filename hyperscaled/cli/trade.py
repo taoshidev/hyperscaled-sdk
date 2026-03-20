@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
+
 import typer
 from rich.console import Console
 from rich.panel import Panel
 
+from hyperscaled.cli._json_error import json_error
 from hyperscaled.models.trading import Order
 
 app = typer.Typer(no_args_is_help=True)
@@ -83,16 +86,22 @@ def _render_cancel_all_result(result: dict[str, object]) -> None:
 def submit(
     pair: str = typer.Option(..., help="Trading pair (e.g. BTC-USDC)"),
     side: str = typer.Option(..., help="Trade side: long or short"),
-    size: float = typer.Option(..., help="Position size"),
+    size: float = typer.Option(..., help="Position size in coin quantity (or USD with --usd)"),
     order_type: str = typer.Option("market", "--type", help="Order type: market or limit"),
     price: float | None = typer.Option(None, help="Limit price (required for limit orders)"),
     take_profit: float | None = typer.Option(None, "--tp", help="Take profit price"),
     stop_loss: float | None = typer.Option(None, "--sl", help="Stop loss price"),
+    usd: bool = typer.Option(
+        False,
+        "--usd",
+        help="Interpret --size as USD notional value instead of coin quantity.",
+    ),
     strict: bool = typer.Option(
         False,
         "--strict",
         help="Exit with code 1 on local rule violations without extra formatting.",
     ),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
 ) -> None:
     """Submit a trade on Hyperliquid."""
     from decimal import Decimal
@@ -111,9 +120,15 @@ def submit(
             price=Decimal(str(price)) if price else None,
             take_profit=Decimal(str(take_profit)) if take_profit else None,
             stop_loss=Decimal(str(stop_loss)) if stop_loss else None,
+            size_in_usd=usd,
         )
+        if json_output:
+            typer.echo(json.dumps(order.model_dump(mode="json"), indent=2, default=str))  # type: ignore[union-attr]
+            return
         _render_order(order)  # type: ignore[arg-type]
     except (ValueError, HyperscaledError) as exc:
+        if json_output:
+            json_error(exc)
         if strict and isinstance(exc, RuleViolationError):
             console.print(str(exc))
         else:
@@ -124,7 +139,10 @@ def submit(
 
 
 @app.command("cancel")
-def cancel(order_id: str) -> None:
+def cancel(
+    order_id: str,
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+) -> None:
     """Cancel an open order."""
     from hyperscaled import HyperscaledClient
     from hyperscaled.exceptions import HyperscaledError
@@ -133,8 +151,13 @@ def cancel(order_id: str) -> None:
     client.open_sync()
     try:
         result = client.trade.cancel(order_id)
+        if json_output:
+            typer.echo(json.dumps(result, indent=2, default=str))  # type: ignore[arg-type]
+            return
         _render_cancel_result(result)  # type: ignore[arg-type]
     except (ValueError, HyperscaledError) as exc:
+        if json_output:
+            json_error(exc)
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(code=1) from None
     finally:
@@ -142,7 +165,9 @@ def cancel(order_id: str) -> None:
 
 
 @app.command("cancel-all")
-def cancel_all() -> None:
+def cancel_all(
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+) -> None:
     """Cancel all open orders."""
     from hyperscaled import HyperscaledClient
     from hyperscaled.exceptions import HyperscaledError
@@ -151,8 +176,13 @@ def cancel_all() -> None:
     client.open_sync()
     try:
         result = client.trade.cancel_all()
+        if json_output:
+            typer.echo(json.dumps(result, indent=2, default=str))  # type: ignore[arg-type]
+            return
         _render_cancel_all_result(result)  # type: ignore[arg-type]
     except (ValueError, HyperscaledError) as exc:
+        if json_output:
+            json_error(exc)
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(code=1) from None
     finally:

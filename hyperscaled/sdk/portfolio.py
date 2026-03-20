@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 import httpx
 
 from hyperscaled.exceptions import HyperscaledError
-from hyperscaled.models.trading import Order, Position
+from hyperscaled.models.trading import ClosedPosition, Order, Position
 from hyperscaled.sdk.client import _run_sync
 
 if TYPE_CHECKING:
@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 
-_HL_DASHBOARD_PATH = "/hl/{hl_address}/dashboard"
+_HL_DASHBOARD_PATH = "/hl-traders/{hl_address}"
 
 
 def _sync_or_async(coro: Coroutine[Any, Any, T]) -> T | Coroutine[Any, Any, T]:
@@ -103,26 +103,24 @@ class PortfolioClient:
         self._client = client
 
     def _resolve_wallet(self) -> str:
-        hl_address = self._client.config.wallet.hl_address
-        if not hl_address:
-            raise HyperscaledError(
-                "No Hyperliquid wallet configured. "
-                "Run `client.account.setup(wallet)` or `hyperscaled account setup <wallet>` first."
-            )
-        return hl_address
+        return self._client.resolve_hl_wallet_address()
 
     async def _fetch_dashboard(self) -> dict[str, Any]:
         hl_address = self._resolve_wallet()
         path = _HL_DASHBOARD_PATH.format(hl_address=hl_address)
 
         try:
-            response = await self._client.http.get(path)
+            response = await self._client.validator_http.get(path)
         except httpx.HTTPError as exc:
             raise HyperscaledError(f"Failed to fetch validator dashboard: {exc}") from exc
 
         if response.status_code == 404:
             raise HyperscaledError(
-                "Validator dashboard not found for the configured Hyperliquid wallet."
+                f"No validator dashboard for Hyperliquid wallet {hl_address}. "
+                "That usually means this address is not registered with the validator yet, "
+                "or HYPERSCALED_VALIDATOR_API_URL points at the wrong host. "
+                "If you use HYPERSCALED_HL_PRIVATE_KEY only, ensure it matches the wallet "
+                "you registered; otherwise set HYPERSCALED_HL_ADDRESS to that registered address."
             )
 
         try:
@@ -134,12 +132,60 @@ class PortfolioClient:
             ) from exc
 
         payload = response.json()
-        dashboard = payload.get("dashboard")
-        if not isinstance(dashboard, dict):
-            raise HyperscaledError("Validator dashboard response missing dashboard payload")
-        return dashboard
+        if not isinstance(payload, dict) or "hl_address" not in payload:
+            raise HyperscaledError("Validator dashboard response has unexpected shape")
+        return payload
 
-    def _map_position(self, raw: dict[str, Any]) -> Position | None:
+    async def _fetch_hl_positions(self) -> dict[str, dict[str, Any]]:
+        """Fetch current positions from the HL clearinghouse for mark/liq prices."""
+        hl_address = self._resolve_wallet()
+        hl_info_url = self._client.config.hl_info_url
+        try:
+            response = await self._client.http.post(
+                hl_info_url,
+                json={"type": "clearinghouseState", "user": hl_address},
+            )
+            response.raise_for_status()
+        except httpx.HTTPError:
+            return {}
+
+        data = response.json()
+        if not isinstance(data, dict):
+            return {}
+        positions = data.get("assetPositions", [])
+        if not isinstance(positions, list):
+            return {}
+
+        result: dict[str, dict[str, Any]] = {}
+        for pos in positions:
+            p = pos.get("position", {}) if isinstance(pos, dict) else {}
+            coin = p.get("coin", "")
+            if coin:
+                # Derive mark price from positionValue / szi when possible
+                mark_price: Decimal | None = None
+                szi = p.get("szi")
+                position_value = p.get("positionValue")
+                if szi is not None and position_value is not None:
+                    try:
+                        szi_dec = Decimal(str(szi))
+                        pv_dec = Decimal(str(position_value))
+                        if szi_dec != 0:
+                            mark_price = abs(pv_dec / szi_dec)
+                    except Exception:
+                        pass
+
+                liq_px = p.get("liquidationPx")
+                result[coin] = {
+                    "mark_price": mark_price,
+                    "liquidation_price": _decimal(liq_px) if liq_px is not None else None,
+                }
+        return result
+
+    def _map_position(
+        self,
+        raw: dict[str, Any],
+        hl_data: dict[str, dict[str, Any]] | None = None,
+    ) -> Position | None:
         """Map a validator position dict to an SDK Position, or None to skip."""
         if raw.get("is_closed_position"):
             return None
@@ -151,14 +197,27 @@ class PortfolioClient:
         side = "long" if position_type == "LONG" else "short"
         take_profit, stop_loss = _extract_tp_sl(raw)
 
+        symbol = _normalize_trade_pair(raw.get("trade_pair"))
+
+        # Resolve mark_price and liquidation_price from HL data if available.
+        # The symbol is e.g. "BTC-USDC"; the HL key is the base coin e.g. "BTC".
+        mark_price: Decimal | None = None
+        liquidation_price: Decimal | None = None
+        if hl_data:
+            hl_coin = symbol.split("-")[0] if "-" in symbol else symbol
+            coin_data = hl_data.get(hl_coin)
+            if coin_data:
+                mark_price = coin_data.get("mark_price")
+                liquidation_price = coin_data.get("liquidation_price")
+
         return Position(
-            symbol=_normalize_trade_pair(raw.get("trade_pair")),
+            symbol=symbol,
             side=side,
             size=_decimal(raw.get("net_quantity")),
             position_value=_decimal(raw.get("net_value")),
             entry_price=_decimal(raw.get("average_entry_price")),
-            mark_price=None,
-            liquidation_price=None,
+            mark_price=mark_price,
+            liquidation_price=liquidation_price,
             unrealized_pnl=_decimal(raw.get("unrealized_pnl")),
             take_profit=take_profit,
             stop_loss=stop_loss,
@@ -196,7 +255,10 @@ class PortfolioClient:
 
     async def open_positions_async(self) -> list[Position]:
         """Return currently open positions for the configured funded account."""
-        dashboard = await self._fetch_dashboard()
+        dashboard, hl_positions = await asyncio.gather(
+            self._fetch_dashboard(),
+            self._fetch_hl_positions(),
+        )
 
         positions_section = dashboard.get("positions")
         if not isinstance(positions_section, dict):
@@ -210,7 +272,7 @@ class PortfolioClient:
         for raw in raw_positions:
             if not isinstance(raw, dict):
                 continue
-            mapped = self._map_position(raw)
+            mapped = self._map_position(raw, hl_data=hl_positions)
             if mapped is not None:
                 result.append(mapped)
         return result
@@ -219,11 +281,55 @@ class PortfolioClient:
         """Return open positions synchronously or asynchronously."""
         return _sync_or_async(self.open_positions_async())
 
-    async def open_orders_async(self) -> list[Order]:
-        """Return currently open orders for the configured funded account."""
-        dashboard = await self._fetch_dashboard()
+    def _map_hl_order(self, raw: dict[str, Any]) -> Order:
+        """Map a Hyperliquid info API open-order dict to an SDK Order.
 
-        raw_orders = dashboard.get("limit_orders")
+        The HL ``open_orders`` response returns dicts like::
+
+            {"coin": "BTC", "limitPx": "67000.0", "oid": 123456,
+             "side": "B", "sz": "0.001", "timestamp": 1710000000000}
+        """
+        coin = str(raw.get("coin", ""))
+        pair = f"{coin.upper()}-USDC" if coin else "UNKNOWN"
+        side: str = "long" if raw.get("side") in ("B", "Buy", "buy") else "short"
+
+        return Order(
+            order_id=str(raw["oid"]) if raw.get("oid") is not None else None,
+            hl_order_id=str(raw["oid"]) if raw.get("oid") is not None else None,
+            pair=pair,
+            side=side,
+            size=_decimal(raw.get("sz")),
+            funded_equivalent_size=None,
+            order_type="limit",
+            status="open",
+            limit_price=_decimal(raw.get("limitPx")),
+            fill_price=None,
+            scaling_ratio=None,
+            take_profit=None,
+            stop_loss=None,
+            created_at=_dt_from_ms(raw.get("timestamp", 0)),
+        )
+
+    async def open_orders_async(self) -> list[Order]:
+        """Return currently open orders by querying the Hyperliquid API directly."""
+        hl_address = self._resolve_wallet()
+        hl_info_url = self._client.config.hl_info_url
+
+        try:
+            response = await self._client.http.post(
+                hl_info_url,
+                json={"type": "openOrders", "user": hl_address},
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise HyperscaledError(
+                f"Hyperliquid open-orders request failed: "
+                f"{exc.response.status_code} {exc.response.reason_phrase}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise HyperscaledError(f"Hyperliquid open-orders request failed: {exc}") from exc
+
+        raw_orders = response.json()
         if not isinstance(raw_orders, list):
             return []
 
@@ -231,9 +337,205 @@ class PortfolioClient:
         for raw in raw_orders:
             if not isinstance(raw, dict):
                 continue
-            result.append(self._map_order(raw))
+            result.append(self._map_hl_order(raw))
         return result
 
     def open_orders(self) -> list[Order] | Coroutine[Any, Any, list[Order]]:
         """Return open orders synchronously or asynchronously."""
         return _sync_or_async(self.open_orders_async())
+
+    # ── Closed position mapping ───────────────────────────────────
+
+    def _map_closed_position(self, raw: dict[str, Any]) -> ClosedPosition | None:
+        """Map a validator position dict with is_closed_position=True to ClosedPosition."""
+        if not raw.get("is_closed_position"):
+            return None
+
+        position_type = str(raw.get("position_type", "")).upper()
+        side = "long" if position_type == "LONG" else "short"
+        take_profit, stop_loss = _extract_tp_sl(raw)
+        symbol = _normalize_trade_pair(raw.get("trade_pair"))
+
+        # realized_pnl: use the explicit field if present, otherwise derive
+        # from return_at_close relative to cumulative_entry_value.
+        realized_pnl_raw = raw.get("realized_pnl")
+        if realized_pnl_raw is not None and Decimal(str(realized_pnl_raw)) != 0:
+            realized_pnl = _decimal(realized_pnl_raw)
+        else:
+            # return_at_close is a multiplier (e.g. 1.05 = +5%).
+            # PnL = (return_at_close - 1) * cumulative_entry_value
+            return_at_close = raw.get("return_at_close", 1.0)
+            entry_value = raw.get("cumulative_entry_value", raw.get("net_value", 0))
+            realized_pnl = _decimal(
+                Decimal(str(return_at_close)) * _decimal(entry_value) - _decimal(entry_value)
+            )
+
+        close_ms = raw.get("close_ms", 0)
+
+        return ClosedPosition(
+            symbol=symbol,
+            side=side,
+            size=_decimal(raw.get("net_quantity")),
+            position_value=_decimal(raw.get("net_value")),
+            entry_price=_decimal(raw.get("average_entry_price")),
+            mark_price=None,
+            liquidation_price=None,
+            unrealized_pnl=Decimal("0"),
+            take_profit=take_profit,
+            stop_loss=stop_loss,
+            open_time=_dt_from_ms(raw.get("open_ms", 0)),
+            realized_pnl=realized_pnl,
+            close_time=_dt_from_ms(close_ms),
+        )
+
+    # ── Position history ──────────────────────────────────────────
+
+    async def position_history_async(
+        self,
+        from_date: datetime | None = None,
+        to_date: datetime | None = None,
+        pair: str | None = None,
+    ) -> list[ClosedPosition]:
+        """Return closed positions from the validator dashboard."""
+        dashboard = await self._fetch_dashboard()
+
+        positions_section = dashboard.get("positions")
+        if not isinstance(positions_section, dict):
+            return []
+
+        raw_positions = positions_section.get("positions", [])
+        if not isinstance(raw_positions, list):
+            return []
+
+        result: list[ClosedPosition] = []
+        for raw in raw_positions:
+            if not isinstance(raw, dict):
+                continue
+            mapped = self._map_closed_position(raw)
+            if mapped is None:
+                continue
+
+            # Date-range filtering on close_time
+            if from_date is not None:
+                from_dt = from_date if from_date.tzinfo else from_date.replace(tzinfo=timezone.utc)
+                if mapped.close_time < from_dt:
+                    continue
+            if to_date is not None:
+                to_dt = to_date if to_date.tzinfo else to_date.replace(tzinfo=timezone.utc)
+                if mapped.close_time > to_dt:
+                    continue
+
+            # Pair filtering
+            if pair is not None and mapped.symbol.upper() != pair.upper():
+                continue
+
+            result.append(mapped)
+
+        return result
+
+    def position_history(
+        self,
+        from_date: datetime | None = None,
+        to_date: datetime | None = None,
+        pair: str | None = None,
+    ) -> list[ClosedPosition] | Coroutine[Any, Any, list[ClosedPosition]]:
+        """Return closed positions synchronously or asynchronously."""
+        return _sync_or_async(
+            self.position_history_async(from_date=from_date, to_date=to_date, pair=pair)
+        )
+
+    # ── Order history ─────────────────────────────────────────────
+
+    def _map_hl_fill(self, raw: dict[str, Any]) -> Order:
+        """Map a Hyperliquid userFills entry to a filled SDK Order."""
+        coin = str(raw.get("coin", ""))
+        pair = f"{coin.upper()}-USDC" if coin else "UNKNOWN"
+        side: str = "long" if raw.get("side") in ("B", "Buy", "buy") else "short"
+
+        return Order(
+            order_id=str(raw["oid"]) if raw.get("oid") is not None else None,
+            hl_order_id=str(raw["oid"]) if raw.get("oid") is not None else None,
+            pair=pair,
+            side=side,
+            size=_decimal(raw.get("sz")),
+            funded_equivalent_size=None,
+            order_type="market",
+            status="filled",
+            limit_price=None,
+            fill_price=_decimal(raw.get("px")),
+            scaling_ratio=None,
+            take_profit=None,
+            stop_loss=None,
+            created_at=_dt_from_ms(raw.get("time", 0)),
+        )
+
+    async def order_history_async(
+        self,
+        from_date: datetime | None = None,
+        to_date: datetime | None = None,
+        pair: str | None = None,
+    ) -> list[Order]:
+        """Return historical filled orders from the Hyperliquid API."""
+        hl_address = self._resolve_wallet()
+        hl_info_url = self._client.config.hl_info_url
+
+        # Use userFillsByTime if date range is provided, otherwise userFills.
+        if from_date is not None or to_date is not None:
+            start_ms = (
+                int(from_date.timestamp() * 1000)
+                if from_date is not None
+                else 0
+            )
+            end_ms = (
+                int(to_date.timestamp() * 1000)
+                if to_date is not None
+                else int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+            )
+            request_body: dict[str, Any] = {
+                "type": "userFillsByTime",
+                "user": hl_address,
+                "startTime": start_ms,
+                "endTime": end_ms,
+            }
+        else:
+            request_body = {"type": "userFills", "user": hl_address}
+
+        try:
+            response = await self._client.http.post(hl_info_url, json=request_body)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise HyperscaledError(
+                f"Hyperliquid order-history request failed: "
+                f"{exc.response.status_code} {exc.response.reason_phrase}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise HyperscaledError(f"Hyperliquid order-history request failed: {exc}") from exc
+
+        raw_fills = response.json()
+        if not isinstance(raw_fills, list):
+            return []
+
+        result: list[Order] = []
+        for raw in raw_fills:
+            if not isinstance(raw, dict):
+                continue
+            order = self._map_hl_fill(raw)
+
+            # Pair filtering
+            if pair is not None and order.pair.upper() != pair.upper():
+                continue
+
+            result.append(order)
+
+        return result
+
+    def order_history(
+        self,
+        from_date: datetime | None = None,
+        to_date: datetime | None = None,
+        pair: str | None = None,
+    ) -> list[Order] | Coroutine[Any, Any, list[Order]]:
+        """Return filled orders synchronously or asynchronously."""
+        return _sync_or_async(
+            self.order_history_async(from_date=from_date, to_date=to_date, pair=pair)
+        )

@@ -45,6 +45,21 @@ def _sample_miner() -> EntityMiner:
     )
 
 
+_VANTATRADING_CATALOG = [
+    {
+        "name": "Vanta Trading",
+        "slug": "vantatrading",
+        "color": "#3b82f6",
+        "payoutCadenceDays": 7,
+        "tiers": [
+            {"accountSize": 25_000, "priceUsdc": 150, "profitSplit": 80},
+            {"accountSize": 50_000, "priceUsdc": 250, "profitSplit": 80},
+            {"accountSize": 100_000, "priceUsdc": 450, "profitSplit": 80},
+        ],
+    }
+]
+
+
 class TestMinersClient:
     async def test_list_all_normalizes_current_entity_catalog_shape(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -246,6 +261,82 @@ class TestMinersClient:
 
         assert [miner.slug for miner in miners] == ["vanta", "zoku"]
         assert seen_paths == ["/api/entity"]
+        await client.close()
+
+    async def test_list_all_returns_required_fields(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """list_all() items expose name, slug, pricing_tiers, and profit_split."""
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(200, json=_VANTATRADING_CATALOG)
+        )
+        client = _make_client(tmp_path, monkeypatch, transport)
+
+        miners = await client.miners.list_all_async()
+
+        assert len(miners) == 1
+        m = miners[0]
+        assert isinstance(m, EntityMiner)
+        assert m.name == "Vanta Trading"
+        assert m.slug == "vantatrading"
+        assert len(m.pricing_tiers) == 3
+        tier = m.pricing_tiers[0]
+        assert isinstance(tier, PricingTier)
+        assert tier.profit_split.trader_pct == 80
+        assert tier.profit_split.miner_pct == 20
+        await client.close()
+
+    async def test_get_vantatrading_returns_full_detail(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """get('vantatrading') returns the full EntityMiner for that slug."""
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(200, json=_VANTATRADING_CATALOG)
+        )
+        client = _make_client(tmp_path, monkeypatch, transport)
+
+        miner = await client.miners.get_async("vantatrading")
+
+        assert miner.slug == "vantatrading"
+        assert miner.name == "Vanta Trading"
+        assert len(miner.pricing_tiers) == 3
+        assert miner.pricing_tiers[0].account_size == 25_000
+        assert miner.pricing_tiers[1].account_size == 50_000
+        assert miner.pricing_tiers[2].account_size == 100_000
+        await client.close()
+
+    async def test_get_nonexistent_slug_raises_clear_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """get() with an unknown slug raises HyperscaledError naming the slug."""
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(200, json=_VANTATRADING_CATALOG)
+        )
+        client = _make_client(tmp_path, monkeypatch, transport)
+
+        with pytest.raises(HyperscaledError, match="ghostminer"):
+            await client.miners.get_async("ghostminer")
+
+        await client.close()
+
+    async def test_pricing_tiers_match_expected_account_sizes_and_costs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pricing tiers for $25k, $50k, $100k carry correct costs and profit splits."""
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(200, json=_VANTATRADING_CATALOG)
+        )
+        client = _make_client(tmp_path, monkeypatch, transport)
+
+        miner = await client.miners.get_async("vantatrading")
+        tiers = {t.account_size: t for t in miner.pricing_tiers}
+
+        assert tiers[25_000].cost == Decimal("150")
+        assert tiers[25_000].profit_split.trader_pct == 80
+        assert tiers[50_000].cost == Decimal("250")
+        assert tiers[50_000].profit_split.trader_pct == 80
+        assert tiers[100_000].cost == Decimal("450")
+        assert tiers[100_000].profit_split.trader_pct == 80
         await client.close()
 
     async def test_compare_missing_slug_raises_hyperscaled_error(

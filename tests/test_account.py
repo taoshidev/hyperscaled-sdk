@@ -14,7 +14,7 @@ from typer.testing import CliRunner
 
 from hyperscaled.cli.main import app
 from hyperscaled.exceptions import HyperscaledError
-from hyperscaled.models.account import MINIMUM_BALANCE, BalanceStatus
+from hyperscaled.models.account import MINIMUM_BALANCE, AccountInfo, BalanceStatus, LeverageLimits
 from hyperscaled.sdk.client import HyperscaledClient
 from hyperscaled.sdk.config import Config, is_valid_hl_address
 
@@ -230,9 +230,9 @@ class TestCheckBalance:
         assert status.balance == Decimal("2000.00")
         assert status.meets_minimum is True
 
-        client.http.post.assert_called_once()  # type: ignore[union-attr]
-        call_kwargs = client.http.post.call_args  # type: ignore[union-attr]
-        assert call_kwargs.kwargs["json"]["user"] == override
+        assert client.http.post.call_count == 2  # type: ignore[union-attr]  # perps + spot
+        first_call = client.http.post.call_args_list[0]  # type: ignore[union-attr]
+        assert first_call.kwargs["json"]["user"] == override
 
         await client.close()
 
@@ -263,6 +263,25 @@ class TestCheckBalance:
         with pytest.raises(HyperscaledError, match="Hyperliquid balance request failed"):
             await client.account.check_balance_async()
 
+        await client.close()
+
+    async def test_nonexistent_wallet_returns_zero_balance_not_crash(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A valid-format address with no HL account returns 0 balance, not an exception."""
+        monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
+        fresh_wallet = "0x" + "de" * 20  # valid format, never funded
+        client = HyperscaledClient(hl_wallet=fresh_wallet)
+        await client.open()
+
+        mock_response = _make_hl_response("0")
+        client.http.post = AsyncMock(return_value=mock_response)  # type: ignore[method-assign]
+
+        status = await client.account.check_balance_async()
+
+        assert status.balance == Decimal("0")
+        assert status.meets_minimum is False
+        assert status.minimum_required == MINIMUM_BALANCE
         await client.close()
 
     async def test_hl_api_unexpected_shape(
@@ -463,3 +482,342 @@ class TestAccountCheckCLI:
 
         assert result.exit_code == 0
         mock_check.assert_called_once_with(override)
+
+
+# ── Account info & limits (SDK) ─────────────────────────────
+
+
+def _make_dashboard(
+    status: str = "active",
+    account_size: int = 50000,
+    drawdown_percent: str = "3.5",
+    drawdown_limit_percent: str = "10.0",
+    entity_miner: str = "miner-alpha",
+    kyc_status: str = "verified",
+) -> dict:
+    return {
+        "hl_address": VALID_ADDRESS,
+        "status": status,
+        "account_size": account_size,
+        "entity_miner": entity_miner,
+        "kyc_status": kyc_status,
+        "challenge_progress": {
+            "drawdown_percent": drawdown_percent,
+            "drawdown_limit_percent": drawdown_limit_percent,
+        },
+        "positions": {"total_leverage": "1.5"},
+    }
+
+
+def _make_trade_pairs_response() -> dict:
+    return {
+        "allowed_trade_pairs": [
+            {
+                "trade_pair_id": "BTCUSD",
+                "trade_pair": "BTC/USD",
+                "trade_pair_category": "crypto",
+                "max_leverage": 50,
+            },
+            {
+                "trade_pair_id": "ETHUSD",
+                "trade_pair": "ETH/USD",
+                "trade_pair_category": "crypto",
+                "max_leverage": 25,
+            },
+            {
+                "trade_pair_id": "EURUSD",
+                "trade_pair": "EUR/USD",
+                "trade_pair_category": "forex",
+                "max_leverage": 100,
+            },
+        ]
+    }
+
+
+def _make_validator_get(dashboard: dict, trade_pairs: dict):
+    """Return an async side_effect for validator_http.get that routes by path."""
+
+    async def _get(path: str, **kwargs: object) -> httpx.Response:
+        if "/hl-traders/" in path:
+            return httpx.Response(
+                200,
+                json=dashboard,
+                request=httpx.Request("GET", f"http://validator{path}"),
+            )
+        if path == "/trade-pairs":
+            return httpx.Response(
+                200,
+                json=trade_pairs,
+                request=httpx.Request("GET", f"http://validator{path}"),
+            )
+        return httpx.Response(404, request=httpx.Request("GET", f"http://validator{path}"))
+
+    return _get
+
+
+class TestAccountInfo:
+    """Tests for client.account.info_async()."""
+
+    async def test_info_returns_account_info(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
+        client = HyperscaledClient(hl_wallet=VALID_ADDRESS)
+        await client.open()
+
+        dashboard = _make_dashboard()
+        trade_pairs = _make_trade_pairs_response()
+        mock_get = _make_validator_get(dashboard, trade_pairs)
+        client.validator_http.get = AsyncMock(side_effect=mock_get)  # type: ignore[method-assign]
+        client.http.post = AsyncMock(return_value=_make_hl_response("12000.00"))  # type: ignore[method-assign]
+
+        info = await client.account.info_async()
+
+        assert isinstance(info, AccountInfo)
+        assert info.status == "active"
+        assert info.funded_account_size == 50000
+        assert info.hl_wallet_address == VALID_ADDRESS
+        assert info.current_drawdown == Decimal("3.5")
+        assert info.max_drawdown_limit == Decimal("10.0")
+        assert info.hl_balance == Decimal("12000.00")
+        assert info.funded_balance == Decimal("50000")
+        assert info.kyc_status == "verified"
+        assert info.entity_miner == "miner-alpha"
+        assert isinstance(info.leverage_limits, LeverageLimits)
+
+        await client.close()
+
+    async def test_info_breached_status(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
+        client = HyperscaledClient(hl_wallet=VALID_ADDRESS)
+        await client.open()
+
+        dashboard = _make_dashboard(status="eliminated")
+        trade_pairs = _make_trade_pairs_response()
+        mock_get = _make_validator_get(dashboard, trade_pairs)
+        client.validator_http.get = AsyncMock(side_effect=mock_get)  # type: ignore[method-assign]
+        client.http.post = AsyncMock(return_value=_make_hl_response("1000.00"))  # type: ignore[method-assign]
+
+        info = await client.account.info_async()
+        assert info.status == "breached"
+
+        await client.close()
+
+    async def test_info_suspended_status(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
+        client = HyperscaledClient(hl_wallet=VALID_ADDRESS)
+        await client.open()
+
+        dashboard = _make_dashboard(status="suspended")
+        trade_pairs = _make_trade_pairs_response()
+        mock_get = _make_validator_get(dashboard, trade_pairs)
+        client.validator_http.get = AsyncMock(side_effect=mock_get)  # type: ignore[method-assign]
+        client.http.post = AsyncMock(return_value=_make_hl_response("1000.00"))  # type: ignore[method-assign]
+
+        info = await client.account.info_async()
+        assert info.status == "suspended"
+
+        await client.close()
+
+    async def test_info_kyc_not_started(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
+        client = HyperscaledClient(hl_wallet=VALID_ADDRESS)
+        await client.open()
+
+        dashboard = _make_dashboard(kyc_status="")
+        trade_pairs = _make_trade_pairs_response()
+        mock_get = _make_validator_get(dashboard, trade_pairs)
+        client.validator_http.get = AsyncMock(side_effect=mock_get)  # type: ignore[method-assign]
+        client.http.post = AsyncMock(return_value=_make_hl_response("1000.00"))  # type: ignore[method-assign]
+
+        info = await client.account.info_async()
+        assert info.kyc_status == "not_started"
+
+        await client.close()
+
+    async def test_info_dashboard_404(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
+        client = HyperscaledClient(hl_wallet=VALID_ADDRESS)
+        await client.open()
+
+        async def _get_404(path: str, **kwargs: object) -> httpx.Response:
+            return httpx.Response(404, request=httpx.Request("GET", f"http://validator{path}"))
+
+        client.validator_http.get = AsyncMock(side_effect=_get_404)  # type: ignore[method-assign]
+
+        with pytest.raises(HyperscaledError, match="No validator dashboard"):
+            await client.account.info_async()
+
+        await client.close()
+
+
+class TestAccountLimits:
+    """Tests for client.account.limits_async()."""
+
+    async def test_limits_returns_leverage_limits(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
+        client = HyperscaledClient(hl_wallet=VALID_ADDRESS)
+        await client.open()
+
+        trade_pairs = _make_trade_pairs_response()
+        response = httpx.Response(
+            200, json=trade_pairs, request=httpx.Request("GET", "http://validator/trade-pairs")
+        )
+        client.validator_http.get = AsyncMock(return_value=response)  # type: ignore[method-assign]
+
+        limits = await client.account.limits_async()
+
+        assert isinstance(limits, LeverageLimits)
+        assert limits.account_level == 20.0  # max of portfolio caps
+        assert limits.position_level["BTC-USDC"] == 50.0
+        assert limits.position_level["ETH-USDC"] == 25.0
+        assert limits.position_level["EUR-USD"] == 100.0
+
+        await client.close()
+
+    async def test_limits_trade_pairs_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
+        client = HyperscaledClient(hl_wallet=VALID_ADDRESS)
+        await client.open()
+
+        error_response = httpx.Response(
+            500, request=httpx.Request("GET", "http://validator/trade-pairs")
+        )
+        client.validator_http.get = AsyncMock(return_value=error_response)  # type: ignore[method-assign]
+
+        with pytest.raises(HyperscaledError, match="Failed to fetch trade pairs"):
+            await client.account.limits_async()
+
+        await client.close()
+
+
+# ── Account info & limits (CLI) ─────────────────────────────
+
+
+class TestInfoCLI:
+    """Tests for `hyperscaled info account` and `hyperscaled info limits`."""
+
+    def test_info_account_renders(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
+
+        info = AccountInfo(
+            status="active",
+            funded_account_size=50000,
+            hl_wallet_address=VALID_ADDRESS,
+            payout_wallet_address="0x" + "bb" * 20,
+            entity_miner="miner-alpha",
+            current_drawdown=Decimal("3.5"),
+            max_drawdown_limit=Decimal("10.0"),
+            leverage_limits=LeverageLimits(
+                account_level=20.0,
+                position_level={"BTC-USDC": 50.0},
+            ),
+            hl_balance=Decimal("12000.00"),
+            funded_balance=Decimal("50000"),
+            kyc_status="verified",
+        )
+
+        with patch(
+            "hyperscaled.sdk.account.AccountClient.info",
+            return_value=info,
+        ):
+            result = runner.invoke(app, ["info", "account"])
+
+        assert result.exit_code == 0
+        assert "active" in result.output
+        assert "50,000" in result.output
+        assert "miner-alpha" in result.output
+
+    def test_info_account_json(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
+
+        info = AccountInfo(
+            status="active",
+            funded_account_size=50000,
+            hl_wallet_address=VALID_ADDRESS,
+            payout_wallet_address="",
+            entity_miner="miner-alpha",
+            current_drawdown=Decimal("3.5"),
+            max_drawdown_limit=Decimal("10.0"),
+            leverage_limits=LeverageLimits(
+                account_level=20.0,
+                position_level={"BTC-USDC": 50.0},
+            ),
+            hl_balance=Decimal("12000.00"),
+            funded_balance=Decimal("50000"),
+            kyc_status="verified",
+        )
+
+        with patch(
+            "hyperscaled.sdk.account.AccountClient.info",
+            return_value=info,
+        ):
+            result = runner.invoke(app, ["info", "account", "--json"])
+
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["status"] == "active"
+        assert data["funded_account_size"] == 50000
+        assert data["leverage_limits"]["account_level"] == 20.0
+
+    def test_info_account_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
+
+        with patch(
+            "hyperscaled.sdk.account.AccountClient.info",
+            side_effect=HyperscaledError("No validator dashboard"),
+        ):
+            result = runner.invoke(app, ["info", "account"])
+
+        assert result.exit_code == 1
+        assert "No validator dashboard" in result.output
+
+    def test_info_limits_renders(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
+
+        lev = LeverageLimits(
+            account_level=20.0,
+            position_level={"BTC-USDC": 50.0, "ETH-USDC": 25.0},
+        )
+
+        with patch(
+            "hyperscaled.sdk.account.AccountClient.limits",
+            return_value=lev,
+        ):
+            result = runner.invoke(app, ["info", "limits"])
+
+        assert result.exit_code == 0
+        assert "20.0x" in result.output
+        assert "BTC-USDC" in result.output
+        assert "50.0x" in result.output
+
+    def test_info_limits_json(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
+
+        lev = LeverageLimits(
+            account_level=20.0,
+            position_level={"BTC-USDC": 50.0},
+        )
+
+        with patch(
+            "hyperscaled.sdk.account.AccountClient.limits",
+            return_value=lev,
+        ):
+            result = runner.invoke(app, ["info", "limits", "--json"])
+
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["account_level"] == 20.0
+        assert data["position_level"]["BTC-USDC"] == 50.0

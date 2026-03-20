@@ -6,6 +6,7 @@ from hyperscaled.models.account import (
     BalanceStatus,
     LeverageLimits,
 )
+from hyperscaled.models.kyc import KycInfo, KycTokenResponse
 from hyperscaled.models.miner import EntityMiner, PricingTier, ProfitSplit
 from hyperscaled.models.payout import Payout
 from hyperscaled.models.registration import (
@@ -21,6 +22,8 @@ __all__ = [
     "BalanceStatus",
     "ClosedPosition",
     "EntityMiner",
+    "KycInfo",
+    "KycTokenResponse",
     "LeverageLimits",
     "MINIMUM_BALANCE",
     "Order",

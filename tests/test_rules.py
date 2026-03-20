@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from decimal import Decimal
 from pathlib import Path
 
@@ -13,9 +12,11 @@ from hyperscaled.exceptions import (
     AccountSuspendedError,
     DrawdownBreachError,
     ExposureLimitError,
+    InsufficientBalanceError,
     LeverageLimitError,
-    TemporarilyHaltedPairError,
+    UnsupportedPairError,
 )
+from hyperscaled.models.account import BalanceStatus
 from hyperscaled.sdk.client import HyperscaledClient
 
 VALID_ADDRESS = "0x" + "a1" * 20
@@ -40,27 +41,26 @@ def _dashboard_payload(
     drawdown_limit_percent: str = "5.0",
     drawdown_usage_percent: str = "20.0",
 ) -> dict[str, object]:
+    account_size = float(balance)
+    capital_used_f = float(capital_used)
+    total_leverage = capital_used_f / account_size if account_size else 0
     return {
-        "status": "success",
+        "status": status if status not in {"active", "admin"} else "success",
         "hl_address": VALID_ADDRESS,
-        "dashboard": {
-            "subaccount_info": {
-                "status": status,
-                "account_size": 10000,
-                "hl_address": VALID_ADDRESS,
-                "payout_address": VALID_ADDRESS,
-            },
-            "challenge_period": {
-                "bucket": bucket,
-                "drawdown_percent": drawdown_percent,
-                "drawdown_limit_percent": drawdown_limit_percent,
-                "drawdown_usage_percent": drawdown_usage_percent,
-            },
-            "account_size_data": {
-                "balance": balance,
-                "capital_used": capital_used,
-                "account_size": 10000,
-            },
+        "account_size": account_size,
+        "payout_address": VALID_ADDRESS,
+        "positions": {
+            "positions": [],
+            "total_leverage": total_leverage,
+        },
+        "drawdown": {
+            "ledger_max_drawdown": 0.95,
+        },
+        "challenge_progress": {
+            "bucket": bucket,
+            "drawdown_percent": drawdown_percent,
+            "drawdown_limit_percent": drawdown_limit_percent,
+            "drawdown_usage_percent": drawdown_usage_percent,
         },
         "timestamp": 1,
     }
@@ -74,11 +74,48 @@ def _make_client(
     monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
     client = HyperscaledClient(base_url="https://api.example.com")
     client._http = httpx.AsyncClient(transport=handler, base_url="https://api.example.com")
+    client._validator_http = httpx.AsyncClient(
+        transport=handler, base_url="https://validator.example.com"
+    )
     client.config.set_value("wallet.hl_address", VALID_ADDRESS)
     return client
 
 
 class TestRulesClient:
+    async def test_supported_pairs_returns_list_of_strings(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        payload = _trade_pairs_payload(
+            {
+                "trade_pair_id": "BTCUSD",
+                "trade_pair": "BTC/USD",
+                "trade_pair_category": "crypto",
+                "max_leverage": 2.5,
+            },
+            {
+                "trade_pair_id": "ETHUSD",
+                "trade_pair": "ETH/USD",
+                "trade_pair_category": "crypto",
+                "max_leverage": 2.5,
+            },
+        )
+
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(200, json=payload)
+            if request.url.path == "/trade-pairs"
+            else httpx.Response(404, json={"error": "unknown"})
+        )
+        client = _make_client(tmp_path, monkeypatch, transport)
+
+        pairs = await client.rules.supported_pairs_async()
+
+        assert isinstance(pairs, list)
+        assert len(pairs) == 2
+        assert all(isinstance(p, str) for p in pairs)
+        assert "BTC-USDC" in pairs
+        assert "ETH-USDC" in pairs
+        await client.close()
+
     async def test_list_all_returns_pair_and_leverage_rules(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -121,13 +158,18 @@ class TestRulesClient:
         def handler(request: httpx.Request) -> httpx.Response:
             if request.url.path == "/trade-pairs":
                 return httpx.Response(200, json=trade_pairs)
-            if request.url.path == f"/hl/{VALID_ADDRESS}/dashboard":
+            if request.url.path == f"/hl-traders/{VALID_ADDRESS}":
                 return httpx.Response(200, json=dashboard)
             if request.url.host == "api.hyperliquid.xyz":
                 return httpx.Response(200, json={"BTC": "100000"})
             return httpx.Response(404, json={"error": "unknown"})
 
         client = _make_client(tmp_path, monkeypatch, httpx.MockTransport(handler))
+
+        async def mock_balance(*_args: object, **_kwargs: object) -> BalanceStatus:
+            return BalanceStatus(balance=Decimal("5000"), meets_minimum=True)
+
+        client.account.check_balance_async = mock_balance  # type: ignore[assignment]
 
         result = await client.rules.validate_trade_async(
             pair="BTC-USDC",
@@ -158,7 +200,7 @@ class TestRulesClient:
         )
         client = _make_client(tmp_path, monkeypatch, transport)
 
-        with pytest.raises(TemporarilyHaltedPairError, match="allowed trade-pair list"):
+        with pytest.raises(UnsupportedPairError, match="Unsupported pair"):
             await client.rules.validate_trade_async(
                 pair="BTC-USDC",
                 side="long",
@@ -183,13 +225,18 @@ class TestRulesClient:
         def handler(request: httpx.Request) -> httpx.Response:
             if request.url.path == "/trade-pairs":
                 return httpx.Response(200, json=trade_pairs)
-            if request.url.path == f"/hl/{VALID_ADDRESS}/dashboard":
+            if request.url.path == f"/hl-traders/{VALID_ADDRESS}":
                 return httpx.Response(200, json=dashboard)
             if request.url.host == "api.hyperliquid.xyz":
                 return httpx.Response(200, json={"BTC": "100000"})
             return httpx.Response(404, json={"error": "unknown"})
 
         client = _make_client(tmp_path, monkeypatch, httpx.MockTransport(handler))
+
+        async def mock_balance(*_args: object, **_kwargs: object) -> BalanceStatus:
+            return BalanceStatus(balance=Decimal("5000"), meets_minimum=True)
+
+        client.account.check_balance_async = mock_balance  # type: ignore[assignment]
 
         with pytest.raises(LeverageLimitError, match="exceeds the validator limit"):
             await client.rules.validate_trade_async(
@@ -216,13 +263,18 @@ class TestRulesClient:
         def handler(request: httpx.Request) -> httpx.Response:
             if request.url.path == "/trade-pairs":
                 return httpx.Response(200, json=trade_pairs)
-            if request.url.path == f"/hl/{VALID_ADDRESS}/dashboard":
+            if request.url.path == f"/hl-traders/{VALID_ADDRESS}":
                 return httpx.Response(200, json=dashboard)
             if request.url.host == "api.hyperliquid.xyz":
                 return httpx.Response(200, json={"BTC": "100000"})
             return httpx.Response(404, json={"error": "unknown"})
 
         client = _make_client(tmp_path, monkeypatch, httpx.MockTransport(handler))
+
+        async def mock_balance(*_args: object, **_kwargs: object) -> BalanceStatus:
+            return BalanceStatus(balance=Decimal("5000"), meets_minimum=True)
+
+        client.account.check_balance_async = mock_balance  # type: ignore[assignment]
 
         with pytest.raises(ExposureLimitError, match="portfolio exposure limit"):
             await client.rules.validate_trade_async(
@@ -249,7 +301,7 @@ class TestRulesClient:
         def handler(request: httpx.Request) -> httpx.Response:
             if request.url.path == "/trade-pairs":
                 return httpx.Response(200, json=trade_pairs)
-            if request.url.path == f"/hl/{VALID_ADDRESS}/dashboard":
+            if request.url.path == f"/hl-traders/{VALID_ADDRESS}":
                 return httpx.Response(200, json=dashboard)
             return httpx.Response(404, json={"error": "unknown"})
 
@@ -285,7 +337,7 @@ class TestRulesClient:
         def handler(request: httpx.Request) -> httpx.Response:
             if request.url.path == "/trade-pairs":
                 return httpx.Response(200, json=trade_pairs)
-            if request.url.path == f"/hl/{VALID_ADDRESS}/dashboard":
+            if request.url.path == f"/hl-traders/{VALID_ADDRESS}":
                 return httpx.Response(200, json=dashboard)
             return httpx.Response(404, json={"error": "unknown"})
 
@@ -299,4 +351,43 @@ class TestRulesClient:
                 order_type="limit",
                 price=Decimal("100000"),
             )
+        await client.close()
+
+    async def test_validate_trade_insufficient_balance(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        trade_pairs = _trade_pairs_payload(
+            {
+                "trade_pair_id": "BTCUSD",
+                "trade_pair": "BTC/USD",
+                "trade_pair_category": "crypto",
+                "max_leverage": 2.5,
+            }
+        )
+        dashboard = _dashboard_payload()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/trade-pairs":
+                return httpx.Response(200, json=trade_pairs)
+            if request.url.path == f"/hl-traders/{VALID_ADDRESS}":
+                return httpx.Response(200, json=dashboard)
+            if request.url.host == "api.hyperliquid.xyz":
+                return httpx.Response(200, json={"BTC": "100000"})
+            return httpx.Response(404, json={"error": "unknown"})
+
+        client = _make_client(tmp_path, monkeypatch, httpx.MockTransport(handler))
+
+        async def low_balance(*_args: object, **_kwargs: object) -> BalanceStatus:
+            return BalanceStatus(balance=Decimal("500"), meets_minimum=False)
+
+        client.account.check_balance_async = low_balance  # type: ignore[assignment]
+
+        with pytest.raises(InsufficientBalanceError, match="below the.*minimum"):
+            await client.rules.validate_trade_async(
+                pair="BTC-USDC",
+                side="long",
+                size=Decimal("0.01"),
+                order_type="market",
+            )
+
         await client.close()

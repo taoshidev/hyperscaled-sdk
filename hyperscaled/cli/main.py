@@ -9,8 +9,9 @@ from hyperscaled.cli.config import app as config_app
 from hyperscaled.cli.data import app as data_app
 from hyperscaled.cli.info import app as info_app
 from hyperscaled.cli.kyc import app as kyc_app
-from hyperscaled.cli.orders import app as orders_app
 from hyperscaled.cli.miners import app as miners_app
+from hyperscaled.cli.orders import app as orders_app
+from hyperscaled.cli.payouts import app as payouts_app
 from hyperscaled.cli.positions import app as positions_app
 from hyperscaled.cli.register import app as register_app
 from hyperscaled.cli.rules import app as rules_app
@@ -33,7 +34,8 @@ app.add_typer(trade_app, name="trade", help="Submit and manage trades.")
 app.add_typer(positions_app, name="positions", help="Open and historical positions.")
 app.add_typer(orders_app, name="orders", help="Open orders and order history.")
 app.add_typer(info_app, name="info", help="Account info and payout history.")
-app.add_typer(kyc_app, name="kyc", help="Identity verification (Privado ID).")
+app.add_typer(payouts_app, name="payouts", help="Payout history and pending payouts.")
+app.add_typer(kyc_app, name="kyc", help="SumSub KYC identity verification.")
 app.add_typer(rules_app, name="rules", help="Vanta Network rules and trade validation.")
 
 

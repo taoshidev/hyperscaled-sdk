@@ -12,7 +12,10 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from hyperscaled.exceptions import HyperscaledError
+import httpx
+
+from hyperscaled.exceptions import HyperscaledError, InsufficientBalanceError
+from hyperscaled.models.account import MINIMUM_BALANCE
 from hyperscaled.models.trading import Order
 from hyperscaled.sdk.pairs import SUPPORTED_PAIRS, normalize_pair_to_hl
 
@@ -65,7 +68,12 @@ class TradingClient:
                 raise HyperscaledError(
                     f"Invalid Hyperliquid private key: {type(exc).__name__}"
                 ) from exc
-            self._exchange = Exchange(wallet=wallet)
+            base_url = self._client.config.hl_base_url if self._client.config.api.testnet else None
+            # Pass empty spot_meta to avoid IndexError in hyperliquid-python-sdk
+            # spot metadata parsing — we only need perp trading functionality.
+            self._exchange = Exchange(
+                wallet=wallet, base_url=base_url, spot_meta={"universe": [], "tokens": []}
+            )
         return self._exchange
 
     def _get_info(self) -> Any:
@@ -78,18 +86,58 @@ class TradingClient:
                     "hyperliquid-python-sdk is not installed. "
                     "Install with: pip install 'hyperliquid-python-sdk>=0.4'"
                 ) from exc
-            self._info = Info(skip_ws=True)
+            base_url = self._client.config.hl_base_url if self._client.config.api.testnet else None
+            # Pass empty spot_meta to avoid IndexError in hyperliquid-python-sdk
+            # spot metadata parsing — we only need perp trading functionality.
+            self._info = Info(
+                base_url=base_url, skip_ws=True, spot_meta={"universe": [], "tokens": []}
+            )
         return self._info
 
     def _resolve_wallet(self) -> str:
-        """Return the configured HL wallet required for order lookups."""
-        resolved = self._client.config.wallet.hl_address
-        if not resolved:
+        """Return the HL wallet address required for order lookups."""
+        return self._client.resolve_hl_wallet_address()
+
+    async def _fetch_sz_decimals(self, hl_name: str) -> int:
+        """Fetch the szDecimals for a perp asset from Hyperliquid metadata."""
+        hl_info_url = self._client.config.hl_info_url
+        try:
+            response = await self._client.http.post(hl_info_url, json={"type": "meta"})
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise HyperscaledError(f"Hyperliquid meta request failed: {exc}") from exc
+
+        payload = response.json()
+        for asset in payload.get("universe", []):
+            if asset.get("name") == hl_name:
+                return int(asset.get("szDecimals", 0))
+        raise HyperscaledError(f"Asset {hl_name} not found in Hyperliquid metadata")
+
+    @staticmethod
+    def _round_size(size: Decimal, sz_decimals: int) -> Decimal:
+        """Round size down to the asset's allowed precision."""
+        if sz_decimals == 0:
+            return size.to_integral_value(rounding="ROUND_DOWN")
+        quant = Decimal(10) ** -sz_decimals
+        return size.quantize(quant, rounding="ROUND_DOWN")
+
+    async def _fetch_mid_price(self, hl_name: str) -> Decimal:
+        """Fetch the current Hyperliquid mid price for a coin."""
+        hl_info_url = self._client.config.hl_info_url
+        try:
+            response = await self._client.http.post(hl_info_url, json={"type": "allMids"})
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
             raise HyperscaledError(
-                "No Hyperliquid wallet configured. "
-                "Run `client.account.setup(wallet)` or `hyperscaled account setup <wallet>` first."
-            )
-        return resolved
+                f"Hyperliquid mid-price request failed: {exc.response.status_code}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise HyperscaledError(f"Hyperliquid mid-price request failed: {exc}") from exc
+
+        payload = response.json()
+        if not isinstance(payload, dict) or hl_name not in payload:
+            raise HyperscaledError(f"Hyperliquid mid price unavailable for {hl_name}")
+        return Decimal(str(payload[hl_name]))
 
     @staticmethod
     def _display_pair_from_hl_name(name: str) -> str:
@@ -145,8 +193,14 @@ class TradingClient:
         price: Decimal | None = None,
         take_profit: Decimal | None = None,
         stop_loss: Decimal | None = None,
+        size_in_usd: bool = False,
     ) -> Order:
-        """Submit an order and return translated funded-account execution info."""
+        """Submit an order and return translated funded-account execution info.
+
+        When *size_in_usd* is ``True``, *size* is interpreted as a USD notional
+        value and automatically converted to coin quantity using the current
+        Hyperliquid mid price.
+        """
         # ── Input validation ──────────────────────────────────
         if not pair.strip():
             raise ValueError("Pair must be a non-empty string")
@@ -177,20 +231,57 @@ class TradingClient:
         # ── Local config preconditions ────────────────────────
         _ = self._client._resolve_hl_private_key()
 
+        # ── Normalize pair ────────────────────────────────────
+        hl_name = normalize_pair_to_hl(pair)
+
+        # ── USD → coin conversion ─────────────────────────────
+        if size_in_usd:
+            mid_price = await self._fetch_mid_price(hl_name)
+            if mid_price <= 0:
+                raise HyperscaledError(f"Invalid mid price for {pair}: {mid_price}")
+            coin_size = size / mid_price
+        else:
+            coin_size = size
+
+        # ── Round to asset precision ──────────────────────────
+        sz_decimals = await self._fetch_sz_decimals(hl_name)
+        coin_size = self._round_size(coin_size, sz_decimals)
+        if coin_size <= 0:
+            raise ValueError(
+                f"Size too small for {pair} after rounding to {sz_decimals} decimals"
+            )
+
         # ── Pre-validation seam (SDK-012) ─────────────────────
-        await self._pre_validate(pair, side, size, order_type, price)
+        await self._pre_validate(pair, side, coin_size, order_type, price)
 
         # ── Live HL balance ───────────────────────────────────
-        balance_status = await self._client.account.check_balance_async()
+        wallet = self._client.account._resolve_wallet()
+        balance_status = await self._client.account.check_balance_async(wallet)
         hl_balance = balance_status.balance
         if hl_balance <= 0:
-            raise HyperscaledError("Hyperliquid account balance is zero or negative")
+            network = "testnet" if self._client.config.api.testnet else "mainnet"
+            raise HyperscaledError(
+                f"Hyperliquid perps account balance is zero or negative "
+                f"(wallet={wallet}, network={network}, accountValue={hl_balance}). "
+                f"If you have funds in your Hyperliquid spot wallet, transfer USDC "
+                f"to perps margin first. Also verify the wallet address and "
+                f"network (testnet vs mainnet) are correct."
+            )
+
+        if hl_balance < MINIMUM_BALANCE:
+            raise InsufficientBalanceError(
+                f"Hyperliquid balance ${hl_balance} is below the "
+                f"${MINIMUM_BALANCE} minimum required to trade.",
+                rule_id="SDK012_INSUFFICIENT_BALANCE",
+                limit=str(MINIMUM_BALANCE),
+                actual_value=str(hl_balance),
+                balance=hl_balance,
+                minimum_required=MINIMUM_BALANCE,
+            )
 
         # ── Scaling ratio ─────────────────────────────────────
         scaling_ratio = Decimal(str(funded_account_size)) / hl_balance
 
-        # ── Normalize pair ────────────────────────────────────
-        hl_name = normalize_pair_to_hl(pair)
         is_buy = side == "long"
 
         # ── Place order via HL SDK ────────────────────────────
@@ -198,12 +289,12 @@ class TradingClient:
         try:
             if order_type == "market":
                 result = await asyncio.to_thread(
-                    exchange.market_open, hl_name, is_buy, float(size)
+                    exchange.market_open, hl_name, is_buy, float(coin_size)
                 )
             else:
                 result = await asyncio.to_thread(
                     exchange.order,
-                    hl_name, is_buy, float(size), float(price),  # type: ignore[arg-type]
+                    hl_name, is_buy, float(coin_size), float(price),  # type: ignore[arg-type]
                     {"limit": {"tif": "Gtc"}},
                 )
         except Exception as exc:
@@ -224,10 +315,14 @@ class TradingClient:
         price: Decimal | None = None,
         take_profit: Decimal | None = None,
         stop_loss: Decimal | None = None,
+        size_in_usd: bool = False,
     ) -> Order | Coroutine[Any, Any, Order]:
         """Submit an order (sync or async), following the pattern from AccountClient."""
         return _sync_or_async(
-            self.submit_async(pair, side, size, order_type, price, take_profit, stop_loss)
+            self.submit_async(
+                pair, side, size, order_type, price, take_profit, stop_loss,
+                size_in_usd=size_in_usd,
+            )
         )
 
     async def cancel_async(self, order_id: str) -> dict[str, object]:

@@ -272,7 +272,7 @@ class RegisterClient:
             body["network"] = "base-sepolia"
 
         try:
-            initial_resp = await self._client.validator_http.post("/api/register", json=body)
+            initial_resp = await self._client.http.post("/api/register", json=body)
         except httpx.HTTPError as exc:
             raise RegistrationError(f"Registration request failed: {exc}") from exc
 
@@ -288,7 +288,7 @@ class RegisterClient:
 
         # 7. Paid POST
         try:
-            paid_resp = await self._client.validator_http.post(
+            paid_resp = await self._client.http.post(
                 "/api/register",
                 json=body,
                 headers=payment_headers,

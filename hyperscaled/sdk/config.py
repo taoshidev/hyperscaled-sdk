@@ -7,7 +7,7 @@ Precedence (highest → lowest):
     1. Values set directly on the model (e.g. via ``config.wallet.hl_address = ...``)
     2. Config file (``~/.hyperscaled/config.toml``)
     3. Environment variables (``HYPERSCALED_HL_ADDRESS``, ``HYPERSCALED_PAYOUT_ADDRESS``,
-       ``HYPERSCALED_BASE_URL``)
+       ``HYPERSCALED_BASE_URL``, ``HYPERSCALED_VALIDATOR_API_URL``)
     4. Defaults
 """
 
@@ -61,6 +61,8 @@ class AccountConfig(BaseModel):
 
 class ApiConfig(BaseModel):
     hyperscaled_base_url: str = "https://api.hyperscaled.com"
+    validator_api_url: str = "http://34.187.154.219:48888"
+    testnet: bool = False
 
 
 class Config(BaseModel):
@@ -99,8 +101,10 @@ class Config(BaseModel):
         """Write the current config to TOML."""
         target = path or self._path
         target.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(target.parent, 0o700)
         data = self.model_dump()
         target.write_bytes(tomli_w.dumps(data).encode())
+        os.chmod(target, 0o600)
 
     def set_value(self, dotted_key: str, value: str) -> None:
         """Set a config value using a dotted key path like ``wallet.hl_address``.
@@ -128,14 +132,35 @@ class Config(BaseModel):
             )
 
         section_data = section.model_dump()
-        section_data[key] = value
+        # Coerce string values for boolean fields
+        field_info = section.__class__.model_fields[key]
+        if field_info.annotation is bool:
+            section_data[key] = value.lower() in ("1", "true", "yes")
+        else:
+            section_data[key] = value
         validated = section.__class__.model_validate(section_data)
         setattr(self, section_name, validated)
+
+    @property
+    def hl_info_url(self) -> str:
+        """Return the Hyperliquid info API URL based on testnet setting."""
+        if self.api.testnet:
+            return "https://api.hyperliquid-testnet.xyz/info"
+        return "https://api.hyperliquid.xyz/info"
+
+    @property
+    def hl_base_url(self) -> str:
+        """Return the Hyperliquid base URL based on testnet setting."""
+        if self.api.testnet:
+            return "https://api.hyperliquid-testnet.xyz"
+        return "https://api.hyperliquid.xyz"
 
     def _apply_env_fallbacks(self, file_data: dict[str, object]) -> None:
         env_hl = os.environ.get("HYPERSCALED_HL_ADDRESS", "")
         env_payout = os.environ.get("HYPERSCALED_PAYOUT_ADDRESS", "")
         env_base_url = os.environ.get("HYPERSCALED_BASE_URL", "")
+        env_validator_url = os.environ.get("HYPERSCALED_VALIDATOR_API_URL", "")
+        env_testnet = os.environ.get("HYPERSCALED_TESTNET", "")
 
         wallet_data = file_data.get("wallet")
         api_data = file_data.get("api")
@@ -154,4 +179,20 @@ class Config(BaseModel):
                 payout_address=env_payout,
             )
         if not api_data.get("hyperscaled_base_url") and env_base_url:
-            self.api = ApiConfig(hyperscaled_base_url=env_base_url)
+            self.api = ApiConfig(
+                hyperscaled_base_url=env_base_url,
+                validator_api_url=self.api.validator_api_url,
+                testnet=self.api.testnet,
+            )
+        if not api_data.get("validator_api_url") and env_validator_url:
+            self.api = ApiConfig(
+                hyperscaled_base_url=self.api.hyperscaled_base_url,
+                validator_api_url=env_validator_url,
+                testnet=self.api.testnet,
+            )
+        if not api_data.get("testnet") and env_testnet:
+            self.api = ApiConfig(
+                hyperscaled_base_url=self.api.hyperscaled_base_url,
+                validator_api_url=self.api.validator_api_url,
+                testnet=env_testnet.lower() in ("1", "true", "yes"),
+            )

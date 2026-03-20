@@ -29,6 +29,7 @@ class TestConfigModel:
         assert config.account.funded_account_id == ""
         assert config.account.kyc_status == "not_started"
         assert config.api.hyperscaled_base_url == "https://api.hyperscaled.com"
+        assert config.api.validator_api_url == "http://34.187.154.219:48888"
 
     def test_valid_address_accepted(self) -> None:
         wallet = WalletConfig(hl_address=VALID_ADDRESS)
@@ -138,6 +139,13 @@ class TestEnvVarFallbacks:
 
         config = Config.load(path=config_path)
         assert config.api.hyperscaled_base_url == "https://custom.api.com"
+
+    def test_validator_api_url_from_env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        config_path = tmp_path / "config.toml"
+        monkeypatch.setenv("HYPERSCALED_VALIDATOR_API_URL", "http://validator.example:9999")
+
+        config = Config.load(path=config_path)
+        assert config.api.validator_api_url == "http://validator.example:9999"
 
     def test_file_value_takes_precedence_over_env(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

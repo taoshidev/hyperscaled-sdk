@@ -8,12 +8,14 @@ from pathlib import Path
 import httpx
 import pytest
 
+from hyperscaled.exceptions import HyperscaledError
 from hyperscaled.sdk.account import AccountClient
 from hyperscaled.sdk.client import HyperscaledClient, _run_sync
 from hyperscaled.sdk.config import Config, WalletConfig
 from hyperscaled.sdk.miners import MinersClient
-from hyperscaled.sdk.register import RegisterClient
+from hyperscaled.sdk.payouts import PayoutsClient
 from hyperscaled.sdk.portfolio import PortfolioClient
+from hyperscaled.sdk.register import RegisterClient
 from hyperscaled.sdk.rules import RulesClient
 from hyperscaled.sdk.trading import TradingClient
 
@@ -30,6 +32,7 @@ class TestConstruction:
         client = HyperscaledClient()
         assert client.config.wallet.hl_address == ""
         assert client.config.api.hyperscaled_base_url == "https://api.hyperscaled.com"
+        assert client.config.api.validator_api_url == "http://34.187.154.219:48888"
 
     def test_constructor_overrides_config(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -77,6 +80,40 @@ class TestConstruction:
         assert client.config.api.hyperscaled_base_url == "https://custom.api.com"
 
 
+# ── resolve_hl_wallet_address ────────────────────────────────
+
+_ANVIL_DEV_KEY = (
+    "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+)
+
+
+class TestResolveHlWalletAddress:
+    def test_uses_config_when_set(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
+        monkeypatch.setenv("HYPERSCALED_HL_PRIVATE_KEY", _ANVIL_DEV_KEY)
+        client = HyperscaledClient(hl_wallet=VALID_ADDRESS)
+        assert client.resolve_hl_wallet_address() == VALID_ADDRESS
+
+    def test_derives_from_env_private_key_when_no_config_address(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from eth_account import Account
+
+        monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
+        monkeypatch.setenv("HYPERSCALED_HL_PRIVATE_KEY", _ANVIL_DEV_KEY)
+        client = HyperscaledClient()
+        assert client.resolve_hl_wallet_address() == Account.from_key(_ANVIL_DEV_KEY).address
+
+    def test_raises_when_no_address_and_no_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
+        monkeypatch.delenv("HYPERSCALED_HL_PRIVATE_KEY", raising=False)
+        client = HyperscaledClient()
+        with pytest.raises(HyperscaledError, match="No Hyperliquid wallet configured"):
+            client.resolve_hl_wallet_address()
+
+
 # ── HTTP session ─────────────────────────────────────────────
 
 
@@ -93,6 +130,13 @@ class TestHTTPSession:
         monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
         client = HyperscaledClient(base_url="https://custom.api.com")
         assert str(client.http.base_url) == "https://custom.api.com"
+
+    def test_validator_http_uses_validator_api_url(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
+        client = HyperscaledClient(validator_api_url="http://custom.validator:1")
+        assert str(client.validator_http.base_url) == "http://custom.validator:1"
 
     def test_http_default_headers(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
@@ -167,8 +211,6 @@ class TestSyncHelpers:
 
 class TestLazySubClients:
     STUBS = [
-        ("payouts", "Sprint 06"),
-        ("kyc", "Sprint 06"),
         ("data", "Phase 2"),
         ("backtest", "Phase 2"),
     ]
@@ -221,6 +263,16 @@ class TestLazySubClients:
 
         assert isinstance(trade, TradingClient)
         assert client._trade is trade
+
+    def test_payouts_lazy_loaded(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
+        client = HyperscaledClient()
+        assert getattr(client, "_payouts", None) is None
+
+        payouts = client.payouts
+
+        assert isinstance(payouts, PayoutsClient)
+        assert client._payouts is payouts
 
     def test_sub_client_settable(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
@@ -277,10 +329,15 @@ class TestSessionRecreation:
         monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
         client = HyperscaledClient()
         first = client.http
+        first_v = client.validator_http
         await client.close()
         assert first.is_closed
+        assert first_v.is_closed
 
         second = client.http
+        second_v = client.validator_http
         assert not second.is_closed
+        assert not second_v.is_closed
         assert second is not first
+        assert second_v is not first_v
         await client.close()
