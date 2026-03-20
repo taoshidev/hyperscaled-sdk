@@ -2,8 +2,8 @@
 
 Handles the end-to-end purchase flow: wallet validation, balance check,
 tier resolution, x402 USDC payment, and backend registration submission.
-Also provides registration status polling against the Hyperscaled status
-endpoint (``GET /api/registration-status?hl_address=...``).
+Also provides registration status polling against the Hyperscaled API
+(``config.api.hyperscaled_base_url``): ``GET /api/registration-status?hl_address=...``.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from hyperscaled.exceptions import (
 )
 from hyperscaled.models.account import MINIMUM_BALANCE
 from hyperscaled.models.registration import TERMINAL_STATUSES, RegistrationStatus
+from hyperscaled.sdk.base_usdc import fetch_base_usdc_balance
 from hyperscaled.sdk.client import _run_sync
 
 if TYPE_CHECKING:
@@ -111,23 +112,89 @@ class RegisterClient:
             )
         return resolved
 
-    def _sign_payment(self, payment_requirements: dict[str, Any], private_key: str) -> str:
+    def payment_wallet_address(self, private_key: str | None = None) -> str:
+        """EVM address that pays registration.
+
+        Resolved from ``HYPERSCALED_BASE_PRIVATE_KEY`` or *private_key*.
+        """
+        try:
+            from eth_account import Account  # type: ignore[import-not-found]
+        except ImportError as exc:
+            raise PaymentError(
+                "eth_account not available. Install with: pip install 'x402[evm]>=2.0'"
+            ) from exc
+
+        key = self._resolve_private_key(private_key)
+        normalized = key if key.startswith("0x") else "0x" + key
+        return Account.from_key(normalized).address
+
+    async def payment_wallet_usdc_balance_async(self, private_key: str | None = None) -> Decimal:
+        """USDC balance on Base for the payment wallet."""
+        addr = self.payment_wallet_address(private_key)
+        return await fetch_base_usdc_balance(
+            addr,
+            testnet=self._client.config.api.testnet,
+        )
+
+    def payment_wallet_usdc_balance(
+        self, private_key: str | None = None
+    ) -> Decimal | Coroutine[Any, Any, Decimal]:
+        """USDC balance on Base (sync or async)."""
+        return _sync_or_async(self.payment_wallet_usdc_balance_async(private_key))
+
+    def _sign_payment(self, initial_resp: Any, private_key: str) -> dict[str, str]:
         """Sign the x402 payment payload using the x402 library.
 
         Lazy-imports the x402 package so it remains an optional dependency.
+        Returns a dict of headers to include in the payment retry request.
         """
         try:
-            from x402.client import x402Client  # type: ignore[import-not-found]
-            from x402.crypto.evm import EthAccountSigner  # type: ignore[import-not-found]
+            from eth_account import Account  # type: ignore[import-not-found]
+            from x402.client import x402ClientSync  # type: ignore[import-not-found]
+            from x402.http.constants import (
+                PAYMENT_REQUIRED_HEADER,  # type: ignore[import-not-found]
+            )
+            from x402.http.utils import (
+                decode_payment_required_header,  # type: ignore[import-not-found]
+            )
+            from x402.http.x402_http_client import (
+                x402HTTPClientSync,  # type: ignore[import-not-found]
+            )
+            from x402.mechanisms.evm.exact import (
+                register_exact_evm_client,  # type: ignore[import-not-found]
+            )
         except ImportError as exc:
             raise PaymentError(
-                "x402 package not installed. Install with: pip install 'x402[httpx,evm]>=2.0'"
+                "x402 package not installed. Install with: pip install 'x402[evm]>=2.0'"
             ) from exc
 
         try:
-            signer = EthAccountSigner(private_key)
-            x402_client = x402Client(signer)
-            return x402_client.create_payment_header(payment_requirements)  # type: ignore[no-any-return]
+            key = private_key if private_key.startswith("0x") else "0x" + private_key
+            account = Account.from_key(key)
+
+            client = x402ClientSync()
+            register_exact_evm_client(client, account)
+            http_client = x402HTTPClientSync(client)
+
+            payment_required_header = initial_resp.headers.get(PAYMENT_REQUIRED_HEADER)
+            if payment_required_header:
+                payment_required = decode_payment_required_header(payment_required_header)
+            else:
+                data = initial_resp.json()
+                version = data.get("x402Version", 1)
+                if version == 2:
+                    from x402.schemas import PaymentRequired  # type: ignore[import-not-found]
+
+                    payment_required = PaymentRequired.model_validate(data)
+                else:
+                    from x402.schemas.v1 import PaymentRequiredV1  # type: ignore[import-not-found]
+
+                    payment_required = PaymentRequiredV1.model_validate(data)
+
+            payload = client.create_payment_payload(payment_required)
+            return http_client.encode_payment_signature_header(payload)
+        except PaymentError:
+            raise
         except Exception as exc:
             raise PaymentError(f"x402 payment signing failed: {exc}") from exc
 
@@ -169,20 +236,21 @@ class RegisterClient:
                 "-- expected format 0x followed by 40 hex chars"
             )
 
-        # 2. Check HL balance
-        from hyperscaled.exceptions import InsufficientBalanceError
+        # 2. Check HL balance (skip on testnet)
+        if not self._client.config.api.testnet:
+            from hyperscaled.exceptions import InsufficientBalanceError
 
-        balance_status = await self._client.account.check_balance_async(hl_wallet)
-        if not balance_status.meets_minimum:
-            raise InsufficientBalanceError(
-                f"HL wallet balance ${balance_status.balance:,.2f} is below the "
-                f"${MINIMUM_BALANCE:,.2f} minimum required for registration.",
-                rule_id="registration_min_balance",
-                limit=str(MINIMUM_BALANCE),
-                actual_value=str(balance_status.balance),
-                balance=balance_status.balance,
-                minimum_required=MINIMUM_BALANCE,
-            )
+            balance_status = await self._client.account.check_balance_async(hl_wallet)
+            if not balance_status.meets_minimum:
+                raise InsufficientBalanceError(
+                    f"HL wallet balance ${balance_status.balance:,.2f} is below the "
+                    f"${MINIMUM_BALANCE:,.2f} minimum required for registration.",
+                    rule_id="registration_min_balance",
+                    limit=str(MINIMUM_BALANCE),
+                    actual_value=str(balance_status.balance),
+                    balance=balance_status.balance,
+                    minimum_required=MINIMUM_BALANCE,
+                )
 
         # 3. Resolve tier
         tier_index, _cost = await self._resolve_tier_index(miner_slug, account_size)
@@ -191,7 +259,7 @@ class RegisterClient:
         resolved_key = self._resolve_private_key(private_key)
 
         # 5. Initial POST — expect 402
-        body = {
+        body: dict[str, Any] = {
             "minerSlug": miner_slug,
             "hlAddress": hl_wallet,
             "accountSize": account_size,
@@ -200,9 +268,11 @@ class RegisterClient:
         }
         if payout_wallet:
             body["payoutAddress"] = payout_wallet
+        if self._client.config.api.testnet:
+            body["network"] = "base-sepolia"
 
         try:
-            initial_resp = await self._client.http.post("/api/register", json=body)
+            initial_resp = await self._client.validator_http.post("/api/register", json=body)
         except httpx.HTTPError as exc:
             raise RegistrationError(f"Registration request failed: {exc}") from exc
 
@@ -213,17 +283,15 @@ class RegisterClient:
                 status_code=initial_resp.status_code,
             )
 
-        payment_requirements = initial_resp.json()
-
         # 6. Sign x402 payment
-        payment_signature = self._sign_payment(payment_requirements, resolved_key)
+        payment_headers = self._sign_payment(initial_resp, resolved_key)
 
         # 7. Paid POST
         try:
-            paid_resp = await self._client.http.post(
+            paid_resp = await self._client.validator_http.post(
                 "/api/register",
                 json=body,
-                headers={"payment-signature": payment_signature},
+                headers=payment_headers,
             )
         except httpx.HTTPError as exc:
             raise RegistrationError(f"Paid registration request failed: {exc}") from exc
@@ -270,8 +338,10 @@ class RegisterClient:
     async def check_status_async(self, hl_address: str) -> RegistrationStatus:
         """Fetch the current registration status for an HL wallet.
 
-        Calls ``GET /api/registration-status?hl_address=<address>`` and
-        returns a :class:`RegistrationStatus`.
+        Uses ``self._client.http`` (base URL ``config.api.hyperscaled_base_url``):
+        ``GET /api/registration-status?hl_address=<address>``.
+
+        Returns a :class:`RegistrationStatus`.
         """
         if not self._client.account.validate_wallet(hl_address):
             raise ValueError(

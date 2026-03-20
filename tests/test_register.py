@@ -21,7 +21,13 @@ from hyperscaled.exceptions import (
     RegistrationPollTimeoutError,
     UnsupportedAccountSizeError,
 )
-from hyperscaled.models import EntityMiner, PricingTier, ProfitSplit, RegistrationStatus
+from hyperscaled.models import (
+    BalanceStatus,
+    EntityMiner,
+    PricingTier,
+    ProfitSplit,
+    RegistrationStatus,
+)
 from hyperscaled.sdk.client import HyperscaledClient
 from hyperscaled.sdk.config import Config
 
@@ -76,7 +82,9 @@ def _make_client(
 ) -> HyperscaledClient:
     monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
     client = HyperscaledClient(base_url="https://api.example.com")
-    client._http = httpx.AsyncClient(transport=handler, base_url="https://api.example.com")
+    shared = httpx.AsyncClient(transport=handler, base_url="https://api.example.com")
+    client._http = shared
+    client._validator_http = shared
     return client
 
 
@@ -211,7 +219,11 @@ class TestRegisterClient:
         client = _make_client(tmp_path, monkeypatch, httpx.MockTransport(_mock_handler))
 
         # Monkeypatch _sign_payment to avoid real x402 dependency
-        monkeypatch.setattr(client.register, "_sign_payment", lambda reqs, key: "test-signature")
+        monkeypatch.setattr(
+            client.register,
+            "_sign_payment",
+            lambda reqs, key: {"payment-signature": "test-signature"},
+        )
 
         result = await client.register.purchase_async(
             "vanta",
@@ -249,7 +261,11 @@ class TestRegisterClient:
             return httpx.Response(404, json={"error": "unknown"})
 
         client = _make_client(tmp_path, monkeypatch, httpx.MockTransport(capture_handler))
-        monkeypatch.setattr(client.register, "_sign_payment", lambda reqs, key: "test-signature")
+        monkeypatch.setattr(
+            client.register,
+            "_sign_payment",
+            lambda reqs, key: {"payment-signature": "test-signature"},
+        )
 
         await client.register.purchase_async(
             "vanta",
@@ -284,7 +300,11 @@ class TestRegisterClient:
             return _mock_handler(request)
 
         client = _make_client(tmp_path, monkeypatch, httpx.MockTransport(failing_paid_handler))
-        monkeypatch.setattr(client.register, "_sign_payment", lambda reqs, key: "test-signature")
+        monkeypatch.setattr(
+            client.register,
+            "_sign_payment",
+            lambda reqs, key: {"payment-signature": "test-signature"},
+        )
 
         with pytest.raises(RegistrationError, match="500"):
             await client.register.purchase_async(
@@ -301,7 +321,11 @@ class TestRegisterClient:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         client = _make_client(tmp_path, monkeypatch, httpx.MockTransport(_mock_handler))
-        monkeypatch.setattr(client.register, "_sign_payment", lambda reqs, key: "test-signature")
+        monkeypatch.setattr(
+            client.register,
+            "_sign_payment",
+            lambda reqs, key: {"payment-signature": "test-signature"},
+        )
 
         result = cast(
             RegistrationStatus,
@@ -316,6 +340,15 @@ class TestRegisterClient:
 
         assert result.status == "registered"
         assert result.account_size == 25_000
+        client.close_sync()
+
+    def test_payment_wallet_address_from_private_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = _make_client(tmp_path, monkeypatch, httpx.MockTransport(_mock_handler))
+        hh = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+        addr = client.register.payment_wallet_address(private_key=hh)
+        assert addr.lower() == "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
         client.close_sync()
 
 
@@ -342,6 +375,9 @@ class _FakeAccountClient:
 
         return bool(re.fullmatch(r"0x[a-fA-F0-9]{40}", address))
 
+    def check_balance(self, wallet_address: str | None = None) -> BalanceStatus:
+        return BalanceStatus(balance=Decimal("5000"), meets_minimum=True)
+
 
 class _FakeMinersClient:
     def __init__(self, miners: list[EntityMiner]) -> None:
@@ -360,6 +396,12 @@ class _FakeRegisterClient:
     def __init__(self, result: RegistrationStatus | None = None, error: Exception | None = None):
         self._result = result
         self._error = error
+
+    def payment_wallet_address(self, private_key: str | None = None) -> str:
+        return VALID_ADDRESS_2
+
+    def payment_wallet_usdc_balance(self, private_key: str | None = None) -> Decimal:
+        return Decimal("500")
 
     def purchase(self, *args: Any, **kwargs: Any) -> RegistrationStatus:
         if self._error:
@@ -443,6 +485,7 @@ class TestRegisterCLI:
         )
 
         assert result.exit_code == 0
+        assert "Checkout summary" in result.output
         assert "Registration Result" in result.output
         assert "registered" in result.output
 
@@ -480,6 +523,7 @@ class TestRegisterCLI:
         )
 
         assert result.exit_code == 0
+        assert "Checkout summary" in result.output
         assert "Registration Result" in result.output
 
     def test_register_purchase_happy_path(
@@ -516,8 +560,38 @@ class TestRegisterCLI:
         )
 
         assert result.exit_code == 0
+        assert "Checkout summary" in result.output
         assert "0x999" in result.output
         assert "Account created." in result.output
+
+    def test_register_cli_rejects_unsupported_account_size(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
+
+        fake = _FakeClient(
+            [_sample_miner()],
+            register_result=RegistrationStatus(status="registered", account_size=100_000),
+        )
+        monkeypatch.setattr("hyperscaled.cli.register.HyperscaledClient", lambda: fake)
+        fake.config.set_value("wallet.hl_address", VALID_ADDRESS)
+
+        result = runner.invoke(
+            app,
+            [
+                "register",
+                "--miner",
+                "vanta",
+                "--size",
+                "100000",
+                "--email",
+                "user@example.com",
+            ],
+        )
+
+        assert result.exit_code == 1
+        assert "not offered" in result.output
+        assert "$50,000" in result.output or "$25,000" in result.output
 
     def test_register_purchase_insufficient_balance(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

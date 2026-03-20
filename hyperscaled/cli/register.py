@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json as _json
+from decimal import Decimal
 from typing import cast
 
 import typer
@@ -20,7 +21,12 @@ from hyperscaled.exceptions import (
     RegistrationPollTimeoutError,
     UnsupportedAccountSizeError,
 )
-from hyperscaled.models import EntityMiner, RegistrationStatus
+from hyperscaled.models import (
+    MINIMUM_BALANCE,
+    BalanceStatus,
+    EntityMiner,
+    RegistrationStatus,
+)
 
 app = typer.Typer(no_args_is_help=True, invoke_without_command=True)
 console = Console()
@@ -44,7 +50,21 @@ def _resolve_wallet_or_exit(client: HyperscaledClient, wallet_address: str | Non
     return resolved
 
 
-def _render_miner_pricing(miner: EntityMiner) -> Panel:
+def _format_money(amount: Decimal) -> str:
+    """Format a dollar amount for display (drops “.00” for whole dollars)."""
+    quantized = amount.quantize(Decimal("0.01"))
+    if quantized == quantized.to_integral():
+        return f"${int(quantized):,}"
+    return f"${quantized:,.2f}"
+
+
+def _short_address(address: str) -> str:
+    if len(address) <= 12:
+        return address
+    return f"{address[:6]}…{address[-4:]}"
+
+
+def _render_miner_pricing(miner: EntityMiner, *, selected_size: int | None = None) -> Panel:
     """Build a Rich panel showing the miner's pricing tiers."""
     table = Table(show_header=True, header_style="bold")
     table.add_column("Account Size", style="cyan")
@@ -52,13 +72,58 @@ def _render_miner_pricing(miner: EntityMiner) -> Panel:
     table.add_column("Profit Split")
 
     for tier in miner.pricing_tiers:
+        row_style = None
+        if selected_size is not None and tier.account_size == selected_size:
+            row_style = "bold green"
         table.add_row(
             f"${tier.account_size:,}",
-            f"${tier.cost}",
+            _format_money(tier.cost),
             f"{tier.profit_split.trader_pct}/{tier.profit_split.miner_pct}",
+            style=row_style,
         )
 
-    return Panel(table, title=f"{miner.name} — Pricing", border_style="cyan")
+    title = f"{miner.name} — Pricing"
+    if selected_size is not None:
+        title += " (selected tier highlighted)"
+    return Panel(table, title=title, border_style="cyan")
+
+
+def _render_checkout_summary(
+    *,
+    account_size: int,
+    tier_cost: Decimal,
+    trader_pct: int,
+    miner_pct: int,
+    hl_address: str,
+    hl_balance_text: str,
+    base_address: str,
+    usdc_balance_text: str,
+    after_payment_text: str,
+    testnet: bool,
+) -> Panel:
+    network = "Base Sepolia" if testnet else "Base"
+    lines = [
+        "[bold underline]Selected tier[/bold underline]",
+        f"  Funded account    [cyan]${account_size:,}[/cyan]",
+        f"  Tier price        {_format_money(tier_cost)} USDC",
+        f"  Profit split      {trader_pct}/{miner_pct} (trader / miner)",
+        "",
+        "[bold underline]Hyperliquid wallet[/bold underline] (perp eligibility)",
+        f"  Address           [dim]{hl_address}[/dim]  ({_short_address(hl_address)})",
+        f"  Account equity    {hl_balance_text}",
+        "",
+        (
+            f"[bold underline]Payment wallet[/bold underline] ({network} — "
+            "from HYPERSCALED_BASE_PRIVATE_KEY)"
+        ),
+        f"  Address           [dim]{base_address}[/dim]  ({_short_address(base_address)})",
+        f"  USDC balance      {usdc_balance_text}",
+        f"  Est. after pay    {after_payment_text}",
+        "",
+        "[dim]Keep a small amount of ETH on Base for gas. Tier price excludes gas.[/dim]",
+    ]
+    border = "yellow" if "insufficient" in after_payment_text.lower() else "green"
+    return Panel("\n".join(lines), title="Checkout summary", border_style=border)
 
 
 def _render_result(result: RegistrationStatus, *, title: str = "Registration Result") -> Panel:
@@ -113,7 +178,72 @@ def _run_purchase(
         console.print(f"[red]Error:[/red] {exc.message}")
         raise typer.Exit(code=1) from None
 
-    console.print(_render_miner_pricing(miner))
+    selected_tier = next((t for t in miner.pricing_tiers if t.account_size == size), None)
+    if selected_tier is None:
+        available = sorted(t.account_size for t in miner.pricing_tiers)
+        sizes_txt = ", ".join(f"${s:,}" for s in available) if available else "(none)"
+        console.print(
+            f"[red]Error:[/red] Account size ${size:,} is not offered by miner "
+            f"[cyan]{miner_slug}[/cyan]. Available: {sizes_txt}"
+        )
+        raise typer.Exit(code=1) from None
+
+    console.print(_render_miner_pricing(miner, selected_size=size))
+
+    # Hyperliquid equity (registration minimum)
+    if client.config.api.testnet:
+        hl_balance_text = "[dim]skipped on testnet — minimum balance rule not enforced[/dim]"
+    else:
+        try:
+            hl_status = cast(BalanceStatus, client.account.check_balance(resolved_hl))
+            min_ok = hl_status.meets_minimum
+            flag = "[green]meets minimum[/green]" if min_ok else "[red]below minimum[/red]"
+            hl_balance_text = (
+                f"{_format_money(hl_status.balance)}  ({flag}; "
+                f"needs ≥ {_format_money(MINIMUM_BALANCE)})"
+            )
+        except HyperscaledError as exc:
+            hl_balance_text = f"[yellow]could not load ({exc.message})[/yellow]"
+
+    try:
+        base_address = client.register.payment_wallet_address()
+    except PaymentError as exc:
+        console.print(f"[red]Error:[/red] {exc.message}")
+        raise typer.Exit(code=1) from None
+
+    usdc_balance: Decimal | None = None
+    try:
+        usdc_balance = cast(Decimal, client.register.payment_wallet_usdc_balance())
+        usdc_balance_text = f"[bold]{_format_money(usdc_balance)}[/bold]"
+    except HyperscaledError as exc:
+        usdc_balance_text = f"[yellow]could not load ({exc.message})[/yellow]"
+
+    if usdc_balance is not None:
+        remaining = usdc_balance - selected_tier.cost
+        after_raw = f"{_format_money(remaining)} USDC"
+        if remaining < 0:
+            after_payment_text = f"[red]{after_raw} (insufficient for this tier)[/red]"
+        elif remaining == 0:
+            after_payment_text = f"[yellow]{after_raw}[/yellow]"
+        else:
+            after_payment_text = f"[green]{after_raw}[/green]"
+    else:
+        after_payment_text = "[dim]—[/dim]"
+
+    console.print(
+        _render_checkout_summary(
+            account_size=size,
+            tier_cost=selected_tier.cost,
+            trader_pct=selected_tier.profit_split.trader_pct,
+            miner_pct=selected_tier.profit_split.miner_pct,
+            hl_address=resolved_hl,
+            hl_balance_text=hl_balance_text,
+            base_address=base_address,
+            usdc_balance_text=usdc_balance_text,
+            after_payment_text=after_payment_text,
+            testnet=client.config.api.testnet,
+        )
+    )
 
     # Confirm purchase
     if not typer.confirm("Proceed with purchase?"):
