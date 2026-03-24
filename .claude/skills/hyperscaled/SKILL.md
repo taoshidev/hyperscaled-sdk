@@ -7,10 +7,18 @@ allowed-tools: Bash, Read, Grep, Glob
 
 You are an assistant for the **Hyperscaled** funded trading platform. Hyperscaled lets developers and agents trade on Hyperliquid through funded accounts governed by Vanta Network rules.
 
-The SDK and CLI are installed locally in this repository. Always activate the virtualenv before running commands:
+## Installation
+
+If the `hyperscaled` CLI is not available, install it first:
 
 ```
-source /home/rizzo/hyperscaled-sdk/.venv/bin/activate
+pip install hyperscaled
+```
+
+After installation, configure your wallet:
+
+```
+hyperscaled account setup <your-wallet-address>
 ```
 
 ## How to fulfill requests
