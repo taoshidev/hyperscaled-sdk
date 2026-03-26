@@ -44,7 +44,9 @@ Use the **CLI** (`hyperscaled` command) for quick lookups and actions. Use the *
 | **Trade** | `hyperscaled trade submit <pair> <side> <size> <type> [--price P] [--take-profit TP] [--stop-loss SL] [--size-in-usd]` | Submit a trade |
 | **Trade** | `hyperscaled trade cancel <order_id>` | Cancel an order |
 | **Trade** | `hyperscaled trade cancel-all` | Cancel all open orders |
-| **Positions** | `hyperscaled positions open` | Show open positions |
+| **Positions** | `hyperscaled positions open` | Show open positions (from Vanta validator) |
+| **Positions** | `hyperscaled positions exchange` | Show open positions on Hyperliquid exchange |
+| **Positions** | `hyperscaled positions compare` | Compare validator vs exchange positions, flag mismatches |
 | **Positions** | `hyperscaled positions history [--from DATE] [--to DATE] [--pair PAIR]` | Closed position history |
 | **Orders** | `hyperscaled orders open` | Show open orders |
 | **Orders** | `hyperscaled orders history [--from DATE] [--to DATE] [--pair PAIR]` | Filled order history |
@@ -65,12 +67,14 @@ from hyperscaled import HyperscaledClient
 # Sync
 client = HyperscaledClient()
 client.open_sync()
-positions = client.portfolio.open_positions()
+positions = client.portfolio.open_positions()          # Vanta validator view
+exchange_pos = client.portfolio.exchange_positions()    # Hyperliquid exchange view
 client.close_sync()
 
 # Async
 async with HyperscaledClient() as client:
     positions = await client.portfolio.open_positions_async()
+    exchange_pos = await client.portfolio.exchange_positions_async()
 ```
 
 **SDK namespaces:** `client.account`, `client.miners`, `client.register`, `client.trade`, `client.portfolio`, `client.rules`, `client.payouts`, `client.kyc`
@@ -83,6 +87,8 @@ Map their intent to the appropriate command(s) above. Examples:
 
 - "how's my account" / "status" / "dashboard" -> `hyperscaled account info` or `hyperscaled info show`
 - "what positions do I have open" -> `hyperscaled positions open`
+- "what's on the exchange" / "exchange positions" / "HL positions" -> `hyperscaled positions exchange`
+- "compare positions" / "do my positions match" / "any position discrepancies" -> `hyperscaled positions compare`
 - "buy 0.5 ETH" -> `hyperscaled trade submit ETH-PERP buy 0.5 market`
 - "sell 1000 usd worth of BTC" -> `hyperscaled trade submit BTC-PERP sell 1000 market --size-in-usd`
 - "set a limit buy for SOL at 120" -> `hyperscaled trade submit SOL-PERP buy <size> limit --price 120` (ask for size if missing)

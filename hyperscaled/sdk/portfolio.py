@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import Coroutine
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 import httpx
 
@@ -136,8 +136,8 @@ class PortfolioClient:
             raise HyperscaledError("Validator dashboard response has unexpected shape")
         return payload
 
-    async def _fetch_hl_positions(self) -> dict[str, dict[str, Any]]:
-        """Fetch current positions from the HL clearinghouse for mark/liq prices."""
+    async def _fetch_hl_clearinghouse(self) -> dict[str, Any]:
+        """Fetch the full HL clearinghouse state for the configured wallet."""
         hl_address = self._resolve_wallet()
         hl_info_url = self._client.config.hl_info_url
         try:
@@ -152,6 +152,11 @@ class PortfolioClient:
         data = response.json()
         if not isinstance(data, dict):
             return {}
+        return data
+
+    async def _fetch_hl_positions(self) -> dict[str, dict[str, Any]]:
+        """Fetch current positions from the HL clearinghouse for mark/liq prices."""
+        data = await self._fetch_hl_clearinghouse()
         positions = data.get("assetPositions", [])
         if not isinstance(positions, list):
             return {}
@@ -245,10 +250,14 @@ class PortfolioClient:
             funded_equivalent_size=_decimal(value) if value is not None else None,
             order_type=execution,
             status="open",
-            limit_price=_decimal(raw["limit_price"]) if raw.get("limit_price") is not None else None,
+            limit_price=_decimal(raw["limit_price"])
+            if raw.get("limit_price") is not None
+            else None,
             fill_price=None,
             scaling_ratio=None,
-            take_profit=_decimal(raw["take_profit"]) if raw.get("take_profit") is not None else None,
+            take_profit=_decimal(raw["take_profit"])
+            if raw.get("take_profit") is not None
+            else None,
             stop_loss=_decimal(raw["stop_loss"]) if raw.get("stop_loss") is not None else None,
             created_at=_dt_from_ms(raw.get("processed_ms", 0)),
         )
@@ -280,6 +289,75 @@ class PortfolioClient:
     def open_positions(self) -> list[Position] | Coroutine[Any, Any, list[Position]]:
         """Return open positions synchronously or asynchronously."""
         return _sync_or_async(self.open_positions_async())
+
+    # ── Exchange (Hyperliquid) positions ──────────────────────────
+
+    def _map_exchange_position(self, raw: dict[str, Any]) -> Position | None:
+        """Map a Hyperliquid clearinghouse assetPosition to an SDK Position."""
+        p = raw.get("position", {}) if isinstance(raw, dict) else {}
+        coin = p.get("coin", "")
+        if not coin:
+            return None
+
+        szi = p.get("szi")
+        if szi is None:
+            return None
+        szi_dec = _decimal(szi)
+        if szi_dec == 0:
+            return None  # flat / no position
+
+        side: Literal["long", "short"] = "long" if szi_dec > 0 else "short"
+        size = abs(szi_dec)
+
+        position_value = _decimal(p.get("positionValue"))
+        entry_price = _decimal(p.get("entryPx"))
+        unrealized_pnl = _decimal(p.get("unrealizedPnl"))
+
+        mark_price: Decimal | None = None
+        if size != 0 and position_value != 0:
+            mark_price = abs(position_value / size)
+
+        liq_px = p.get("liquidationPx")
+        liquidation_price = _decimal(liq_px) if liq_px is not None else None
+
+        symbol = f"{coin.upper()}-USDC"
+
+        return Position(
+            symbol=symbol,
+            side=side,
+            size=size,
+            position_value=abs(position_value),
+            entry_price=entry_price,
+            mark_price=mark_price,
+            liquidation_price=liquidation_price,
+            unrealized_pnl=unrealized_pnl,
+            take_profit=None,
+            stop_loss=None,
+            open_time=datetime.now(tz=timezone.utc),  # HL doesn't expose open time
+        )
+
+    async def exchange_positions_async(self) -> list[Position]:
+        """Return open positions as reported by the Hyperliquid exchange.
+
+        These come directly from Hyperliquid's clearinghouse state and
+        represent what is actually on-exchange, independent of how the
+        Vanta Network validator tracks them.
+        """
+        data = await self._fetch_hl_clearinghouse()
+        asset_positions = data.get("assetPositions", [])
+        if not isinstance(asset_positions, list):
+            return []
+
+        result: list[Position] = []
+        for raw in asset_positions:
+            mapped = self._map_exchange_position(raw)
+            if mapped is not None:
+                result.append(mapped)
+        return result
+
+    def exchange_positions(self) -> list[Position] | Coroutine[Any, Any, list[Position]]:
+        """Return Hyperliquid exchange positions synchronously or asynchronously."""
+        return _sync_or_async(self.exchange_positions_async())
 
     def _map_hl_order(self, raw: dict[str, Any]) -> Order:
         """Map a Hyperliquid info API open-order dict to an SDK Order.
@@ -481,11 +559,7 @@ class PortfolioClient:
 
         # Use userFillsByTime if date range is provided, otherwise userFills.
         if from_date is not None or to_date is not None:
-            start_ms = (
-                int(from_date.timestamp() * 1000)
-                if from_date is not None
-                else 0
-            )
+            start_ms = int(from_date.timestamp() * 1000) if from_date is not None else 0
             end_ms = (
                 int(to_date.timestamp() * 1000)
                 if to_date is not None
