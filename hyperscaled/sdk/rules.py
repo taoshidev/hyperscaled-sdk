@@ -227,35 +227,30 @@ class RulesClient:
 
     def _assert_account_status(self, dashboard: dict[str, Any]) -> None:
         """Raise if the validator says the account is not currently tradeable."""
-        # Check for elimination first
-        elimination = dashboard.get("elimination")
-        if isinstance(elimination, dict):
-            drawdown = dashboard.get("drawdown", {})
-            if isinstance(drawdown, dict):
-                current_drawdown = _decimal(drawdown.get("intraday_drawdown_pct"))
-                threshold = _decimal(drawdown.get("intraday_drawdown_threshold"))
-                max_drawdown = threshold * 100
-                if current_drawdown > 0 and max_drawdown > 0:
-                    raise DrawdownBreachError(
-                        "Account has breached the drawdown limit and cannot place new trades.",
-                        rule_id=_RULE_IDS["drawdown_breach"],
-                        limit=str(max_drawdown),
-                        actual_value=str(current_drawdown),
-                        current_drawdown=current_drawdown,
-                        max_drawdown=max_drawdown,
-                    )
-            raise AccountSuspendedError(
-                "Account is not currently tradeable (status: eliminated).",
-                reason="eliminated",
-                suspended_at=datetime.now(timezone.utc),
-            )
-
         sub_info = dashboard.get("subaccount_info", {})
         if not isinstance(sub_info, dict):
             sub_info = {}
         status = str(sub_info.get("status", "")).lower()
-        if status in {"", "active", "admin"}:
+        if status in {"", "success", "active", "admin"}:
             return
+
+        if status == "eliminated":
+            drawdown = dashboard.get("drawdown", {})
+            current_drawdown = _decimal(
+                drawdown.get("intraday_drawdown_pct") if isinstance(drawdown, dict) else None
+            )
+            max_drawdown = _decimal(
+                drawdown.get("intraday_drawdown_threshold") if isinstance(drawdown, dict) else None
+            )
+            if current_drawdown > 0 and max_drawdown > 0:
+                raise DrawdownBreachError(
+                    "Account has breached the drawdown limit and cannot place new trades.",
+                    rule_id=_RULE_IDS["drawdown_breach"],
+                    limit=str(max_drawdown),
+                    actual_value=str(current_drawdown),
+                    current_drawdown=current_drawdown,
+                    max_drawdown=max_drawdown,
+                )
 
         raise AccountSuspendedError(
             f"Account is not currently tradeable (status: {status}).",
@@ -264,63 +259,49 @@ class RulesClient:
         )
 
     def _assert_drawdown(self, dashboard: dict[str, Any]) -> None:
-        """Raise when drawdown metrics show the account has already breached."""
+        """Raise when drawdown shows the account has already breached."""
         drawdown = dashboard.get("drawdown", {})
         if not isinstance(drawdown, dict):
             return
 
-        # Intraday drawdown check
         current = _decimal(drawdown.get("intraday_drawdown_pct"))
-        threshold = _decimal(drawdown.get("intraday_drawdown_threshold"))
-        limit = threshold * 100  # fraction → percent
-        if limit > 0 and current >= limit:
+        limit = _decimal(drawdown.get("intraday_drawdown_threshold"))
+        # Convert to positive values for comparison (API returns negative pct)
+        current_abs = abs(current)
+        if limit > 0 and current_abs >= limit:
             raise DrawdownBreachError(
                 "Account has breached the validator drawdown limit.",
                 rule_id=_RULE_IDS["drawdown_breach"],
                 limit=str(limit),
-                actual_value=str(current),
-                current_drawdown=current,
+                actual_value=str(current_abs),
+                current_drawdown=current_abs,
                 max_drawdown=limit,
-            )
-
-        # EOD trailing drawdown check
-        eod_current = _decimal(drawdown.get("eod_drawdown_pct"))
-        eod_threshold = _decimal(drawdown.get("eod_drawdown_threshold"))
-        eod_limit = eod_threshold * 100
-        if eod_limit > 0 and eod_current >= eod_limit:
-            raise DrawdownBreachError(
-                "Account has breached the validator drawdown limit.",
-                rule_id=_RULE_IDS["drawdown_breach"],
-                limit=str(eod_limit),
-                actual_value=str(eod_current),
-                current_drawdown=eod_current,
-                max_drawdown=eod_limit,
             )
 
     @staticmethod
     def _account_context(dashboard: dict[str, Any]) -> tuple[Decimal, Decimal, Decimal, bool]:
         """Extract funded balance, current exposure, HWM, and challenge mode."""
-        challenge = dashboard.get("challenge_period", {})
-        positions = dashboard.get("positions", {})
-
-        if not isinstance(challenge, dict):
-            challenge = {}
-        if not isinstance(positions, dict):
-            positions = {}
-
         sub_info = dashboard.get("subaccount_info", {})
+        positions = dashboard.get("positions", {})
+        challenge_period = dashboard.get("challenge_period", {})
+
         if not isinstance(sub_info, dict):
             sub_info = {}
+        if not isinstance(positions, dict):
+            positions = {}
+        if not isinstance(challenge_period, dict):
+            challenge_period = {}
 
         account_size = _decimal(sub_info.get("account_size"))
         funded_balance = account_size
         total_leverage = _decimal(positions.get("total_leverage"))
         current_exposure = account_size * total_leverage
+        in_challenge = challenge_period.get("bucket") == "SUBACCOUNT_CHALLENGE"
         return (
             funded_balance,
             current_exposure,
             account_size,
-            bool(challenge.get("bucket") == "SUBACCOUNT_CHALLENGE"),
+            bool(in_challenge),
         )
 
     async def supported_pairs_async(self) -> list[str]:
@@ -411,19 +392,6 @@ class RulesClient:
         dashboard = await self._fetch_dashboard(wallet)
         self._assert_account_status(dashboard)
         self._assert_drawdown(dashboard)
-
-        # ── HL balance minimum check ─────────────────────────
-        balance_status = await self._client.account.check_balance_async(wallet)
-        if balance_status.balance < MINIMUM_BALANCE:
-            raise InsufficientBalanceError(
-                f"Hyperliquid balance ${balance_status.balance} is below the "
-                f"${MINIMUM_BALANCE} minimum required to trade.",
-                rule_id=_RULE_IDS["insufficient_balance"],
-                limit=str(MINIMUM_BALANCE),
-                actual_value=str(balance_status.balance),
-                balance=balance_status.balance,
-                minimum_required=MINIMUM_BALANCE,
-            )
 
         funded_balance, current_exposure, _account_size, in_challenge = self._account_context(dashboard)
         if funded_balance <= 0:

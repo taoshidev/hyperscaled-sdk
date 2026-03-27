@@ -68,11 +68,23 @@ class TradingClient:
                 raise HyperscaledError(
                     f"Invalid Hyperliquid private key: {type(exc).__name__}"
                 ) from exc
+
             base_url = self._client.config.hl_base_url if self._client.config.api.testnet else None
+
+            # When the private key belongs to an API wallet (agent), the main
+            # account address must be passed explicitly so that position lookups
+            # (e.g. market_close) query the right account.
+            main_address = (self._client.config.wallet.hl_address or "").strip() or None
+            api_address = wallet.address
+            account_address = main_address if main_address and main_address.lower() != api_address.lower() else None
+
             # Pass empty spot_meta to avoid IndexError in hyperliquid-python-sdk
             # spot metadata parsing — we only need perp trading functionality.
             self._exchange = Exchange(
-                wallet=wallet, base_url=base_url, spot_meta={"universe": [], "tokens": []}
+                wallet=wallet,
+                base_url=base_url,
+                spot_meta={"universe": [], "tokens": []},
+                account_address=account_address,
             )
         return self._exchange
 
@@ -268,17 +280,6 @@ class TradingClient:
                 f"network (testnet vs mainnet) are correct."
             )
 
-        if hl_balance < MINIMUM_BALANCE:
-            raise InsufficientBalanceError(
-                f"Hyperliquid balance ${hl_balance} is below the "
-                f"${MINIMUM_BALANCE} minimum required to trade.",
-                rule_id="SDK012_INSUFFICIENT_BALANCE",
-                limit=str(MINIMUM_BALANCE),
-                actual_value=str(hl_balance),
-                balance=hl_balance,
-                minimum_required=MINIMUM_BALANCE,
-            )
-
         # ── Scaling ratio ─────────────────────────────────────
         scaling_ratio = Decimal(str(funded_account_size)) / hl_balance
 
@@ -392,6 +393,89 @@ class TradingClient:
     def cancel_all(self) -> dict[str, object] | Coroutine[Any, Any, dict[str, object]]:
         """Cancel all open orders (sync or async)."""
         return _sync_or_async(self.cancel_all_async())
+
+    async def close_async(self, pair: str) -> Order:
+        """Market-close the full open position for *pair*.
+
+        Fetches the current position size from Hyperliquid, then submits a
+        market order in the opposite direction to fully close it.
+        """
+        if not pair.strip():
+            raise ValueError("Pair must be a non-empty string")
+
+        funded_account_size = self._client.config.account.funded_account_size
+        if funded_account_size <= 0:
+            raise HyperscaledError(
+                "No funded account size configured. "
+                "Reconnect with /connect after ensuring you have an active funded account."
+            )
+
+        hl_name = normalize_pair_to_hl(pair)
+
+        # Fetch the current position from Hyperliquid clearinghouse
+        hl_info_url = self._client.config.hl_info_url
+        wallet = self._resolve_wallet()
+        try:
+            response = await self._client.http.post(
+                hl_info_url,
+                json={"type": "clearinghouseState", "user": wallet},
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise HyperscaledError(f"Failed to fetch positions: {exc}") from exc
+
+        data = response.json()
+        asset_positions = data.get("assetPositions", [])
+        position = next(
+            (
+                p["position"]
+                for p in asset_positions
+                if isinstance(p, dict) and p.get("position", {}).get("coin") == hl_name
+            ),
+            None,
+        )
+
+        if position is None or float(position.get("szi", 0)) == 0:
+            raise HyperscaledError(f"No open position found for {pair}.")
+
+        szi = Decimal(str(position["szi"]))
+        is_long = szi > 0
+
+        # Close via market_close (handles size + slippage automatically)
+        exchange = self._get_exchange()
+        try:
+            result = await asyncio.to_thread(exchange.market_close, hl_name)
+        except Exception as exc:
+            raise HyperscaledError(f"Hyperliquid close failed: {exc}") from exc
+
+        if result is None:
+            raise HyperscaledError(
+                f"Hyperliquid returned no response for close on {pair}. "
+                "The position may already be closed."
+            )
+
+        # Compute scaling ratio for display
+        balance_status = await self._client.account.check_balance_async(wallet)
+        scaling_ratio = Decimal(str(funded_account_size)) / balance_status.balance
+
+        # Closing a long is a short order and vice versa
+        close_side = "short" if is_long else "long"
+
+        return self._parse_hl_response(
+            result,
+            pair=pair,
+            side=close_side,
+            size=abs(szi),
+            order_type="market",
+            scaling_ratio=scaling_ratio,
+            take_profit=None,
+            stop_loss=None,
+            price=None,
+        )
+
+    def close(self, pair: str) -> Order | Coroutine[Any, Any, Order]:
+        """Close the full open position for *pair* (sync or async)."""
+        return _sync_or_async(self.close_async(pair))
 
     def _parse_cancel_response(
         self,

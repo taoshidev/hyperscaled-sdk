@@ -205,16 +205,14 @@ class AccountClient:
     @staticmethod
     def _map_status(dashboard: dict[str, Any]) -> str:
         """Map the validator dashboard status to an AccountInfo status string."""
-        if dashboard.get("elimination"):
-            return "breached"
-        sub_info = dashboard.get("subaccount_info", {})
-        if not isinstance(sub_info, dict):
-            sub_info = {}
-        raw = str(sub_info.get("status", "")).lower()
-        if raw in {"", "active", "admin"}:
+        raw = str(dashboard.get("status", "")).lower()
+        if raw in {"", "success", "active", "admin"}:
             return "active"
+        if raw == "eliminated":
+            return "breached"
         if raw in {"suspended", "paused"}:
             return "suspended"
+        # Treat anything else as suspended
         return "suspended"
 
     @staticmethod
@@ -236,6 +234,7 @@ class AccountClient:
         # Fetch HL balance
         balance_status = await self.check_balance_async(hl_address)
 
+        # The validator response nests account data under subaccount_info
         sub_info = dashboard.get("subaccount_info", {})
         if not isinstance(sub_info, dict):
             sub_info = {}
@@ -244,38 +243,24 @@ class AccountClient:
         if not isinstance(drawdown, dict):
             drawdown = {}
 
-        account_size = sub_info.get("account_size", 0)
-        current_drawdown = Decimal(str(drawdown.get("intraday_drawdown_pct", "0")))
-        # Threshold is a fraction (0.05 = 5%); convert to percent for display
-        max_drawdown = Decimal(str(drawdown.get("intraday_drawdown_threshold", "0"))) * 100
-
-        # Use account_size_data.balance for funded_balance when available
-        account_size_data = dashboard.get("account_size_data", {})
-        if isinstance(account_size_data, dict) and "balance" in account_size_data:
-            funded_balance = Decimal(str(account_size_data["balance"]))
-        else:
-            funded_balance = Decimal(str(account_size))
-
-        payout_addr = (
-            sub_info.get("payout_address", "")
-            or self._client.config.wallet.payout_address
-            or ""
-        )
+        account_size = sub_info.get("account_size", 0) or 0
+        current_drawdown = Decimal(str(drawdown.get("intraday_drawdown_pct", "0") or "0"))
+        max_drawdown = Decimal(str(drawdown.get("intraday_drawdown_threshold", "0") or "0"))
 
         # Build per-pair leverage from trade pairs
         leverage_limits = await self.limits_async()
 
         return AccountInfo(
-            status=self._map_status(dashboard),  # type: ignore[arg-type]
+            status=self._map_status(sub_info),  # type: ignore[arg-type]
             funded_account_size=int(account_size),
             hl_wallet_address=hl_address,
-            payout_wallet_address=payout_addr,
-            entity_miner="",
+            payout_wallet_address=sub_info.get("payout_address") or self._client.config.wallet.payout_address or "",
+            entity_miner=str(sub_info.get("asset_class", "")),
             current_drawdown=current_drawdown,
             max_drawdown_limit=max_drawdown,
             leverage_limits=leverage_limits,
             hl_balance=balance_status.balance,
-            funded_balance=funded_balance,
+            funded_balance=Decimal(str(account_size)),
             kyc_status=self._map_kyc_status(dashboard),  # type: ignore[arg-type]
         )
 
