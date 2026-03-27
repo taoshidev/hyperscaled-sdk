@@ -29,12 +29,23 @@ class AccountInfo(BaseModel):
     """Full status and configuration for a funded account."""
 
     status: Literal["active", "suspended", "pending_kyc", "breached"]
+    account_type: Literal["challenge", "funded"] = "funded"
     funded_account_size: int
     hl_wallet_address: str
     payout_wallet_address: str
     entity_miner: str
+    # Intraday drawdown (resets each day)
     current_drawdown: Decimal
     max_drawdown_limit: Decimal
+    # End-of-day trailing drawdown
+    eod_drawdown: Decimal = Decimal("0")
+    eod_drawdown_limit: Decimal = Decimal("0")
+    # Payout period performance
+    total_realized_pnl: Decimal = Decimal("0")
+    current_equity_ratio: Decimal = Decimal("1")  # e.g. 1.05 = +5%
+    # Portfolio leverage
+    current_leverage: Decimal = Decimal("0")   # leverage currently in use
+    max_portfolio_leverage: Decimal = Decimal("0")  # max allowed given account type
     leverage_limits: LeverageLimits
     hl_balance: Decimal
     funded_balance: Decimal

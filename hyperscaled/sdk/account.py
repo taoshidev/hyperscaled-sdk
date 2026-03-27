@@ -205,16 +205,14 @@ class AccountClient:
     @staticmethod
     def _map_status(dashboard: dict[str, Any]) -> str:
         """Map the validator dashboard status to an AccountInfo status string."""
-        if dashboard.get("elimination"):
-            return "breached"
-        sub_info = dashboard.get("subaccount_info", {})
-        if not isinstance(sub_info, dict):
-            sub_info = {}
-        raw = str(sub_info.get("status", "")).lower()
-        if raw in {"", "active", "admin"}:
+        raw = str(dashboard.get("status", "")).lower()
+        if raw in {"", "success", "active", "admin"}:
             return "active"
+        if raw == "eliminated":
+            return "breached"
         if raw in {"suspended", "paused"}:
             return "suspended"
+        # Treat anything else as suspended
         return "suspended"
 
     @staticmethod
@@ -236,6 +234,7 @@ class AccountClient:
         # Fetch HL balance
         balance_status = await self.check_balance_async(hl_address)
 
+        # The validator response nests account data under subaccount_info
         sub_info = dashboard.get("subaccount_info", {})
         if not isinstance(sub_info, dict):
             sub_info = {}
@@ -244,38 +243,62 @@ class AccountClient:
         if not isinstance(drawdown, dict):
             drawdown = {}
 
-        account_size = sub_info.get("account_size", 0)
-        current_drawdown = Decimal(str(drawdown.get("intraday_drawdown_pct", "0")))
-        # Threshold is a fraction (0.05 = 5%); convert to percent for display
-        max_drawdown = Decimal(str(drawdown.get("intraday_drawdown_threshold", "0"))) * 100
+        challenge_period = dashboard.get("challenge_period", {})
+        if not isinstance(challenge_period, dict):
+            challenge_period = {}
+        bucket = str(challenge_period.get("bucket", "")).upper()
+        account_type = "challenge" if "CHALLENGE" in bucket else "funded"
 
-        # Use account_size_data.balance for funded_balance when available
+        account_size = sub_info.get("account_size", 0) or 0
+
+        current_drawdown = Decimal(str(drawdown.get("intraday_drawdown_pct", "0") or "0"))
+        max_drawdown = Decimal(str(drawdown.get("intraday_drawdown_threshold", "0") or "0"))
+        eod_drawdown = Decimal(str(drawdown.get("eod_drawdown_pct", "0") or "0"))
+        eod_drawdown_limit = Decimal(str(drawdown.get("eod_drawdown_threshold", "0") or "0"))
+        current_equity_ratio = Decimal(str(drawdown.get("current_equity", "1") or "1"))
+
         account_size_data = dashboard.get("account_size_data", {})
-        if isinstance(account_size_data, dict) and "balance" in account_size_data:
-            funded_balance = Decimal(str(account_size_data["balance"]))
-        else:
-            funded_balance = Decimal(str(account_size))
+        if not isinstance(account_size_data, dict):
+            account_size_data = {}
+        total_realized_pnl = Decimal(str(account_size_data.get("total_realized_pnl", "0") or "0"))
 
-        payout_addr = (
-            sub_info.get("payout_address", "")
-            or self._client.config.wallet.payout_address
-            or ""
-        )
+        # Current portfolio leverage from positions
+        positions_section = dashboard.get("positions", {})
+        current_leverage = Decimal(str(
+            positions_section.get("total_leverage", "0")
+            if isinstance(positions_section, dict) else "0"
+        ))
+
+        # Max portfolio leverage — crypto cap, halved in challenge mode
+        _CRYPTO_CAP = Decimal("5")
+        _CHALLENGE_DIVISOR = Decimal("4")
+        base_cap = _CRYPTO_CAP  # default; refined by asset_class if needed
+        asset_class = str(sub_info.get("asset_class", "crypto")).lower()
+        _CAPS = {"crypto": Decimal("5"), "forex": Decimal("20"), "indices": Decimal("10"), "equities": Decimal("2")}
+        base_cap = _CAPS.get(asset_class, _CRYPTO_CAP)
+        max_portfolio_leverage = base_cap / _CHALLENGE_DIVISOR if account_type == "challenge" else base_cap
 
         # Build per-pair leverage from trade pairs
         leverage_limits = await self.limits_async()
 
         return AccountInfo(
-            status=self._map_status(dashboard),  # type: ignore[arg-type]
+            status=self._map_status(sub_info),  # type: ignore[arg-type]
+            account_type=account_type,  # type: ignore[arg-type]
             funded_account_size=int(account_size),
             hl_wallet_address=hl_address,
-            payout_wallet_address=payout_addr,
-            entity_miner="",
+            payout_wallet_address=sub_info.get("payout_address") or self._client.config.wallet.payout_address or "",
+            entity_miner=str(sub_info.get("asset_class", "")),
             current_drawdown=current_drawdown,
             max_drawdown_limit=max_drawdown,
+            eod_drawdown=eod_drawdown,
+            eod_drawdown_limit=eod_drawdown_limit,
+            total_realized_pnl=total_realized_pnl,
+            current_equity_ratio=current_equity_ratio,
+            current_leverage=current_leverage,
+            max_portfolio_leverage=max_portfolio_leverage,
             leverage_limits=leverage_limits,
             hl_balance=balance_status.balance,
-            funded_balance=funded_balance,
+            funded_balance=Decimal(str(account_size)),
             kyc_status=self._map_kyc_status(dashboard),  # type: ignore[arg-type]
         )
 
