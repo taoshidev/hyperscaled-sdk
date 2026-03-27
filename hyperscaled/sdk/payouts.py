@@ -110,9 +110,13 @@ class PayoutsClient:
             ) from exc
 
         payload = response.json()
-        if not isinstance(payload, dict):
+        if (
+            not isinstance(payload, dict)
+            or payload.get("status") != "success"
+            or "dashboard" not in payload
+        ):
             raise HyperscaledError("Validator dashboard response has unexpected shape")
-        return payload
+        return payload["dashboard"]
 
     async def history_async(self) -> list[Payout]:
         """Fetch payout history from the validator dashboard.

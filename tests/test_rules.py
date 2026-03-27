@@ -37,31 +37,54 @@ def _dashboard_payload(
     balance: str = "10000",
     capital_used: str = "1000",
     bucket: str = "SUBACCOUNT_FUNDED",
-    drawdown_percent: str = "1.0",
-    drawdown_limit_percent: str = "5.0",
-    drawdown_usage_percent: str = "20.0",
+    intraday_drawdown_pct: float = 1.0,
+    intraday_drawdown_threshold: float = 0.05,
+    eliminated: bool = False,
 ) -> dict[str, object]:
     account_size = float(balance)
     capital_used_f = float(capital_used)
     total_leverage = capital_used_f / account_size if account_size else 0
-    return {
-        "status": status if status not in {"active", "admin"} else "success",
-        "hl_address": VALID_ADDRESS,
-        "account_size": account_size,
-        "payout_address": VALID_ADDRESS,
+    dashboard: dict[str, object] = {
+        "subaccount_info": {
+            "synthetic_hotkey": "entity_hotkey_0",
+            "subaccount_uuid": "uuid-1",
+            "subaccount_id": 0,
+            "asset_class": "crypto",
+            "account_size": account_size,
+            "status": status,
+            "created_at_ms": 1700000000000,
+            "eliminated_at_ms": 1710000000000 if eliminated else None,
+            "hl_address": VALID_ADDRESS,
+            "payout_address": VALID_ADDRESS,
+        },
         "positions": {
-            "positions": [],
+            "positions": {},
             "total_leverage": total_leverage,
         },
         "drawdown": {
-            "ledger_max_drawdown": 0.95,
+            "current_equity": 1.0,
+            "daily_open_equity": 1.0,
+            "eod_hwm": 1.0,
+            "last_eod_equity": 1.0,
+            "intraday_drawdown_pct": intraday_drawdown_pct,
+            "eod_drawdown_pct": 0,
+            "intraday_drawdown_threshold": intraday_drawdown_threshold,
+            "eod_drawdown_threshold": intraday_drawdown_threshold,
         },
-        "challenge_progress": {
+        "challenge_period": {
             "bucket": bucket,
-            "drawdown_percent": drawdown_percent,
-            "drawdown_limit_percent": drawdown_limit_percent,
-            "drawdown_usage_percent": drawdown_usage_percent,
+            "start_time_ms": 1700000000000,
         },
+    }
+    if eliminated:
+        dashboard["elimination"] = {
+            "elimination_initiated_time_ms": 1710000000000,
+            "reason": "drawdown_breach",
+            "dd": intraday_drawdown_pct,
+        }
+    return {
+        "status": "success",
+        "dashboard": dashboard,
         "timestamp": 1,
     }
 
@@ -329,9 +352,8 @@ class TestRulesClient:
             }
         )
         dashboard = _dashboard_payload(
-            drawdown_percent="5.0",
-            drawdown_limit_percent="5.0",
-            drawdown_usage_percent="100.0",
+            intraday_drawdown_pct=5.0,
+            intraday_drawdown_threshold=0.05,
         )
 
         def handler(request: httpx.Request) -> httpx.Response:

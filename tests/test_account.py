@@ -490,22 +490,49 @@ class TestAccountCheckCLI:
 def _make_dashboard(
     status: str = "active",
     account_size: int = 50000,
-    drawdown_percent: str = "3.5",
-    drawdown_limit_percent: str = "10.0",
-    entity_miner: str = "miner-alpha",
-    kyc_status: str = "verified",
+    intraday_drawdown_pct: float = 3.5,
+    intraday_drawdown_threshold: float = 0.10,
+    eliminated: bool = False,
 ) -> dict:
-    return {
-        "hl_address": VALID_ADDRESS,
-        "status": status,
-        "account_size": account_size,
-        "entity_miner": entity_miner,
-        "kyc_status": kyc_status,
-        "challenge_progress": {
-            "drawdown_percent": drawdown_percent,
-            "drawdown_limit_percent": drawdown_limit_percent,
+    dashboard: dict = {
+        "subaccount_info": {
+            "synthetic_hotkey": "entity_hotkey_0",
+            "subaccount_uuid": "uuid-1",
+            "subaccount_id": 0,
+            "asset_class": "crypto",
+            "account_size": account_size,
+            "status": status,
+            "created_at_ms": 1700000000000,
+            "eliminated_at_ms": 1710000000000 if eliminated else None,
+            "hl_address": VALID_ADDRESS,
+            "payout_address": VALID_ADDRESS,
         },
-        "positions": {"total_leverage": "1.5"},
+        "drawdown": {
+            "current_equity": 0.965,
+            "daily_open_equity": 1.0,
+            "eod_hwm": 1.0,
+            "last_eod_equity": 0.97,
+            "intraday_drawdown_pct": intraday_drawdown_pct,
+            "eod_drawdown_pct": 0,
+            "intraday_drawdown_threshold": intraday_drawdown_threshold,
+            "eod_drawdown_threshold": intraday_drawdown_threshold,
+        },
+        "challenge_period": {
+            "bucket": "SUBACCOUNT_FUNDED",
+            "start_time_ms": 1700000000000,
+        },
+        "positions": {"positions": {}, "total_leverage": 1.5},
+    }
+    if eliminated:
+        dashboard["elimination"] = {
+            "elimination_initiated_time_ms": 1710000000000,
+            "reason": "drawdown_breach",
+            "dd": intraday_drawdown_pct,
+        }
+    return {
+        "status": "success",
+        "dashboard": dashboard,
+        "timestamp": 1710000000000,
     }
 
 
@@ -581,8 +608,8 @@ class TestAccountInfo:
         assert info.max_drawdown_limit == Decimal("10.0")
         assert info.hl_balance == Decimal("12000.00")
         assert info.funded_balance == Decimal("50000")
-        assert info.kyc_status == "verified"
-        assert info.entity_miner == "miner-alpha"
+        assert info.kyc_status == "not_started"
+        assert info.entity_miner == ""
         assert isinstance(info.leverage_limits, LeverageLimits)
 
         await client.close()
@@ -594,7 +621,7 @@ class TestAccountInfo:
         client = HyperscaledClient(hl_wallet=VALID_ADDRESS)
         await client.open()
 
-        dashboard = _make_dashboard(status="eliminated")
+        dashboard = _make_dashboard(eliminated=True)
         trade_pairs = _make_trade_pairs_response()
         mock_get = _make_validator_get(dashboard, trade_pairs)
         client.validator_http.get = AsyncMock(side_effect=mock_get)  # type: ignore[method-assign]
@@ -630,7 +657,7 @@ class TestAccountInfo:
         client = HyperscaledClient(hl_wallet=VALID_ADDRESS)
         await client.open()
 
-        dashboard = _make_dashboard(kyc_status="")
+        dashboard = _make_dashboard()
         trade_pairs = _make_trade_pairs_response()
         mock_get = _make_validator_get(dashboard, trade_pairs)
         client.validator_http.get = AsyncMock(side_effect=mock_get)  # type: ignore[method-assign]

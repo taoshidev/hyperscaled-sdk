@@ -26,11 +26,28 @@ def _make_dashboard_response(
     pending_payout: dict | None = None,
 ) -> httpx.Response:
     """Construct a fake validator dashboard response with payout data."""
-    body: dict = {"hl_address": VALID_ADDRESS}
+    dashboard: dict = {
+        "subaccount_info": {
+            "synthetic_hotkey": "entity_hotkey_0",
+            "subaccount_uuid": "uuid-1",
+            "subaccount_id": 0,
+            "asset_class": "crypto",
+            "account_size": 50000,
+            "status": "active",
+            "created_at_ms": 1700000000000,
+            "eliminated_at_ms": None,
+            "hl_address": VALID_ADDRESS,
+        },
+    }
     if payouts is not None:
-        body["payouts"] = payouts
+        dashboard["payouts"] = payouts
     if pending_payout is not None:
-        body["pending_payout"] = pending_payout
+        dashboard["pending_payout"] = pending_payout
+    body = {
+        "status": "success",
+        "dashboard": dashboard,
+        "timestamp": 1710000000000,
+    }
     return httpx.Response(
         200,
         json=body,

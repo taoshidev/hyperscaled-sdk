@@ -96,6 +96,83 @@ def _extract_tp_sl(raw_position: dict[str, Any]) -> tuple[Decimal | None, Decima
     return take_profit, stop_loss
 
 
+def _normalize_compact_position(compact: dict[str, Any], account_size: float) -> dict[str, Any]:
+    """Expand an abbreviated dashboard position blob into the legacy field layout.
+
+    The new ``get_hl_trader`` response uses compact keys (``tp``, ``t``,
+    ``ap``, …).  This converts them to full field names that
+    ``_map_position`` / ``_map_closed_position`` expect.
+    """
+    ap = Decimal(str(compact.get("ap", 0) or 0))
+    nl = Decimal(str(compact.get("nl", 0) or 0))
+    r = Decimal(str(compact.get("r", 1.0) or 1.0))
+    rp = compact.get("rp", 0) or 0
+    acct = Decimal(str(account_size))
+
+    net_value = abs(nl * acct) if nl and acct else Decimal(0)
+    net_quantity = abs(net_value / ap) if ap else Decimal(0)
+    entry_value = net_quantity * ap
+    unrealized_pnl = (r - 1) * entry_value if entry_value else Decimal(0)
+
+    # Expand filled orders so _extract_tp_sl can find TP/SL values
+    orders: list[dict[str, Any]] = []
+    fo = compact.get("fo", {})
+    if isinstance(fo, dict):
+        for order_data in fo.values():
+            if isinstance(order_data, dict):
+                orders.append({
+                    "take_profit": order_data.get("tk"),
+                    "stop_loss": order_data.get("sl"),
+                })
+
+    return {
+        "trade_pair": compact.get("tp", ""),
+        "position_type": compact.get("t", "FLAT"),
+        "is_closed_position": "c" in compact,
+        "net_quantity": net_quantity,
+        "net_value": net_value,
+        "average_entry_price": ap,
+        "unrealized_pnl": unrealized_pnl,
+        "open_ms": compact.get("o", 0),
+        "close_ms": compact.get("c", 0),
+        "current_return": r,
+        "return_at_close": compact.get("rc", 1.0),
+        "net_leverage": nl,
+        "realized_pnl": rp,
+        "orders": orders,
+        "unfilled_orders": [],
+    }
+
+
+def _positions_list(
+    dashboard: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Extract positions as a flat list, handling both old and new formats."""
+    positions_section = dashboard.get("positions")
+    if not isinstance(positions_section, dict):
+        return []
+
+    raw = positions_section.get("positions", {})
+
+    # New format: dict keyed by position_uuid with abbreviated keys
+    if isinstance(raw, dict):
+        sub_info = dashboard.get("subaccount_info", {})
+        account_size = float(
+            sub_info.get("account_size", 0) if isinstance(sub_info, dict) else 0
+        )
+        return [
+            _normalize_compact_position(pos, account_size)
+            for pos in raw.values()
+            if isinstance(pos, dict)
+        ]
+
+    # Legacy format: plain list of position dicts
+    if isinstance(raw, list):
+        return [p for p in raw if isinstance(p, dict)]
+
+    return []
+
+
 class PortfolioClient:
     """Read-only portfolio visibility for open positions and open orders."""
 
@@ -132,9 +209,13 @@ class PortfolioClient:
             ) from exc
 
         payload = response.json()
-        if not isinstance(payload, dict) or "hl_address" not in payload:
+        if (
+            not isinstance(payload, dict)
+            or payload.get("status") != "success"
+            or "dashboard" not in payload
+        ):
             raise HyperscaledError("Validator dashboard response has unexpected shape")
-        return payload
+        return payload["dashboard"]
 
     async def _fetch_hl_clearinghouse(self) -> dict[str, Any]:
         """Fetch the full HL clearinghouse state for the configured wallet."""
@@ -269,18 +350,10 @@ class PortfolioClient:
             self._fetch_hl_positions(),
         )
 
-        positions_section = dashboard.get("positions")
-        if not isinstance(positions_section, dict):
-            return []
-
-        raw_positions = positions_section.get("positions", [])
-        if not isinstance(raw_positions, list):
-            return []
+        raw_positions = _positions_list(dashboard)
 
         result: list[Position] = []
         for raw in raw_positions:
-            if not isinstance(raw, dict):
-                continue
             mapped = self._map_position(raw, hl_data=hl_positions)
             if mapped is not None:
                 result.append(mapped)
@@ -477,18 +550,10 @@ class PortfolioClient:
         """Return closed positions from the validator dashboard."""
         dashboard = await self._fetch_dashboard()
 
-        positions_section = dashboard.get("positions")
-        if not isinstance(positions_section, dict):
-            return []
-
-        raw_positions = positions_section.get("positions", [])
-        if not isinstance(raw_positions, list):
-            return []
+        raw_positions = _positions_list(dashboard)
 
         result: list[ClosedPosition] = []
         for raw in raw_positions:
-            if not isinstance(raw, dict):
-                continue
             mapped = self._map_closed_position(raw)
             if mapped is None:
                 continue

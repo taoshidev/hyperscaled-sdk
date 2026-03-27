@@ -25,40 +25,41 @@ runner = CliRunner()
 
 def _position_entry(
     *,
-    trade_pair: list | None = None,
+    trade_pair: str = "BTC/USD",
     position_type: str = "LONG",
-    is_closed_position: bool = False,
-    net_quantity: float = 0.015,
-    net_value: float = 1500.0,
+    is_closed: bool = False,
     average_entry_price: float = 100000.0,
-    unrealized_pnl: float = 75.0,
+    net_leverage: float = 0.15,
+    current_return: float = 1.05,
+    realized_pnl: float = 0.0,
     open_ms: int = 1710000000000,
     close_ms: int = 0,
-    orders: list | None = None,
+    return_at_close: float = 1.0,
+    position_uuid: str | None = None,
+    filled_orders: dict | None = None,
     unfilled_orders: list | None = None,
 ) -> dict:
-    return {
-        "miner_hotkey": "entity_hotkey_0",
-        "position_uuid": "pos-uuid-1",
-        "trade_pair": trade_pair or ["BTCUSD", "BTC/USD", 0.003, 0.001, 0.5],
-        "position_type": position_type,
-        "is_closed_position": is_closed_position,
-        "net_quantity": net_quantity,
-        "net_value": net_value,
-        "average_entry_price": average_entry_price,
-        "unrealized_pnl": unrealized_pnl,
-        "open_ms": open_ms,
-        "close_ms": close_ms,
-        "current_return": 1.05,
-        "net_leverage": 0.15,
-        "return_at_close": 1.0,
-        "cumulative_entry_value": 1500.0,
-        "account_size": 10000.0,
-        "realized_pnl": 0.0,
-        "is_hl": True,
-        "orders": orders or [],
-        "unfilled_orders": unfilled_orders or [],
+    """Build a compact position blob matching the new dashboard format."""
+    result: dict = {
+        "tp": trade_pair,
+        "t": position_type,
+        "o": open_ms,
+        "r": current_return,
+        "ap": average_entry_price,
+        "rp": realized_pnl,
     }
+    if position_uuid is not None:
+        result["_uuid"] = position_uuid
+    if net_leverage:
+        result["nl"] = net_leverage
+    if is_closed:
+        result["c"] = close_ms
+        result["rc"] = return_at_close
+    if filled_orders:
+        result["fo"] = filled_orders
+    if unfilled_orders:
+        result["uo"] = unfilled_orders
+    return result
 
 
 def _order_entry(
@@ -104,25 +105,49 @@ def _order_entry(
 def _dashboard_payload(
     *,
     positions: list | None = None,
-    limit_orders: list | None = None,
 ) -> dict:
+    # Convert position list to the new dict-keyed-by-uuid format
+    positions_dict: dict = {}
+    if positions is not None:
+        for i, pos in enumerate(positions):
+            uuid = pos.pop("_uuid", f"pos-uuid-{i}")
+            positions_dict[uuid] = pos
+
     return {
         "status": "success",
-        "synthetic_hotkey": "entity_hotkey_0",
-        "hl_address": VALID_ADDRESS,
-        "account_size": 10000.0,
-        "payout_address": VALID_ADDRESS,
-        "positions": {
-            "positions": positions if positions is not None else [],
-            "thirty_day_returns": 1.0,
-            "all_time_returns": 1.0,
-            "n_positions": 0,
-            "percentage_profitable": 0.0,
-            "total_leverage": 0.0,
+        "dashboard": {
+            "subaccount_info": {
+                "synthetic_hotkey": "entity_hotkey_0",
+                "subaccount_uuid": "uuid-1",
+                "subaccount_id": 0,
+                "asset_class": "crypto",
+                "account_size": 10000.0,
+                "status": "active",
+                "created_at_ms": 1700000000000,
+                "eliminated_at_ms": None,
+                "hl_address": VALID_ADDRESS,
+                "payout_address": VALID_ADDRESS,
+            },
+            "positions": {
+                "positions": positions_dict,
+                "total_leverage": 0.0,
+                "positions_time_ms": 1710000000000,
+            },
+            "drawdown": {
+                "current_equity": 1.0,
+                "daily_open_equity": 1.0,
+                "eod_hwm": 1.0,
+                "last_eod_equity": 1.0,
+                "intraday_drawdown_pct": 0,
+                "eod_drawdown_pct": 0,
+                "intraday_drawdown_threshold": 0.05,
+                "eod_drawdown_threshold": 0.05,
+            },
+            "challenge_period": {
+                "bucket": "SUBACCOUNT_FUNDED",
+                "start_time_ms": 1700000000000,
+            },
         },
-        "drawdown": {"ledger_max_drawdown": 0.95},
-        "challenge_progress": {"bucket": "SUBACCOUNT_FUNDED", "start_time_ms": 1700000000000},
-        "limit_orders": limit_orders if limit_orders is not None else [],
         "timestamp": 1710000000000,
     }
 
@@ -257,8 +282,8 @@ class TestOpenPositions:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         entries = [
-            _position_entry(is_closed_position=False),
-            _position_entry(is_closed_position=True),
+            _position_entry(is_closed=False),
+            _position_entry(is_closed=True),
         ]
         payload = _dashboard_payload(positions=entries)
         client = _make_client(tmp_path, monkeypatch, _transport_for(payload))
@@ -292,8 +317,8 @@ class TestOpenPositions:
     async def test_open_positions_extracts_tp_sl(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        orders = [{"take_profit": 110000.0, "stop_loss": 95000.0}]
-        entry = _position_entry(orders=orders)
+        fo = {"order-1": {"tk": 110000.0, "sl": 95000.0, "t": "LONG", "v": 1500, "e": "MARKET", "p": 1710000000000}}
+        entry = _position_entry(filled_orders=fo)
         payload = _dashboard_payload(positions=[entry])
         client = _make_client(tmp_path, monkeypatch, _transport_for(payload))
 
@@ -316,7 +341,7 @@ class TestOpenPositions:
     async def test_open_positions_pair_normalization(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        entry = _position_entry(trade_pair=["ETHUSD", "ETH/USD", 0.003, 0.001, 0.5])
+        entry = _position_entry(trade_pair="ETH/USD")
         payload = _dashboard_payload(positions=[entry])
         client = _make_client(tmp_path, monkeypatch, _transport_for(payload))
 
@@ -371,10 +396,10 @@ class TestOpenPositions:
     ) -> None:
         """Each position gets matched to its coin in the HL data."""
         entries = [
-            _position_entry(trade_pair=["BTCUSD", "BTC/USD", 0.003, 0.001, 0.5]),
+            _position_entry(trade_pair="BTC/USD"),
             _position_entry(
-                trade_pair=["ETHUSD", "ETH/USD", 0.003, 0.001, 0.5],
-                net_quantity=1.0,
+                trade_pair="ETH/USD",
+                net_leverage=0.3,
                 average_entry_price=3000.0,
             ),
         ]
@@ -712,8 +737,8 @@ class TestPositionHistory:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         entries = [
-            _position_entry(is_closed_position=True, close_ms=1710100000000),
-            _position_entry(is_closed_position=False),
+            _position_entry(is_closed=True, close_ms=1710100000000),
+            _position_entry(is_closed=False),
         ]
         payload = _dashboard_payload(positions=entries)
         client = _make_client(tmp_path, monkeypatch, _transport_for(payload))
@@ -732,11 +757,11 @@ class TestPositionHistory:
         # Two closed positions at different times
         entries = [
             _position_entry(
-                is_closed_position=True,
+                is_closed=True,
                 close_ms=1704067200000,  # 2024-01-01 00:00 UTC
             ),
             _position_entry(
-                is_closed_position=True,
+                is_closed=True,
                 close_ms=1706745600000,  # 2024-02-01 00:00 UTC
             ),
         ]
@@ -759,14 +784,14 @@ class TestPositionHistory:
     ) -> None:
         entries = [
             _position_entry(
-                is_closed_position=True,
+                is_closed=True,
                 close_ms=1710100000000,
-                trade_pair=["BTCUSD", "BTC/USD", 0.003, 0.001, 0.5],
+                trade_pair="BTC/USD",
             ),
             _position_entry(
-                is_closed_position=True,
+                is_closed=True,
                 close_ms=1710100000000,
-                trade_pair=["ETHUSD", "ETH/USD", 0.003, 0.001, 0.5],
+                trade_pair="ETH/USD",
             ),
         ]
         payload = _dashboard_payload(positions=entries)
@@ -793,7 +818,7 @@ class TestPositionHistory:
         """Empty date range returns empty list, not error."""
         entries = [
             _position_entry(
-                is_closed_position=True,
+                is_closed=True,
                 close_ms=1710100000000,
             ),
         ]
@@ -813,10 +838,10 @@ class TestPositionHistory:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         entry = _position_entry(
-            is_closed_position=True,
+            is_closed=True,
             close_ms=1710100000000,
+            realized_pnl=250.0,
         )
-        entry["realized_pnl"] = 250.0
         payload = _dashboard_payload(positions=[entry])
         client = _make_client(tmp_path, monkeypatch, _transport_for(payload))
 
@@ -828,7 +853,7 @@ class TestPositionHistory:
     def test_position_history_sync(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        entries = [_position_entry(is_closed_position=True, close_ms=1710100000000)]
+        entries = [_position_entry(is_closed=True, close_ms=1710100000000)]
         payload = _dashboard_payload(positions=entries)
         client = _make_client(tmp_path, monkeypatch, _transport_for(payload))
 
@@ -945,8 +970,7 @@ class TestPositionHistoryCLI:
     def test_positions_history_table(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        entry = _position_entry(is_closed_position=True, close_ms=1710100000000)
-        entry["realized_pnl"] = 150.0
+        entry = _position_entry(is_closed=True, close_ms=1710100000000, realized_pnl=150.0)
         payload = _dashboard_payload(positions=[entry])
         monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
 
@@ -962,8 +986,7 @@ class TestPositionHistoryCLI:
     def test_positions_history_json(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        entry = _position_entry(is_closed_position=True, close_ms=1710100000000)
-        entry["realized_pnl"] = 150.0
+        entry = _position_entry(is_closed=True, close_ms=1710100000000, realized_pnl=150.0)
         payload = _dashboard_payload(positions=[entry])
         monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
 
@@ -1001,12 +1024,12 @@ class TestPositionHistoryCLI:
     ) -> None:
         entries = [
             _position_entry(
-                is_closed_position=True, close_ms=1710100000000,
-                trade_pair=["BTCUSD", "BTC/USD", 0.003, 0.001, 0.5],
+                is_closed=True, close_ms=1710100000000,
+                trade_pair="BTC/USD",
             ),
             _position_entry(
-                is_closed_position=True, close_ms=1710100000000,
-                trade_pair=["ETHUSD", "ETH/USD", 0.003, 0.001, 0.5],
+                is_closed=True, close_ms=1710100000000,
+                trade_pair="ETH/USD",
             ),
         ]
         payload = _dashboard_payload(positions=entries)
