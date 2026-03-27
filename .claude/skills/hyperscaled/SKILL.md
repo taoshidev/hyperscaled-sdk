@@ -29,7 +29,7 @@ Use the **CLI** (`hyperscaled` command) for quick lookups and actions. Use the *
 
 | Area | Command | What it does |
 |------|---------|-------------|
-| **Account** | `hyperscaled account info` | Full account status (balance, drawdown, funded size, KYC, leverage limits) |
+| **Account** | `hyperscaled account info` | Full account status (balance, intraday & EOD drawdown, funded size, account type, current & max portfolio leverage, KYC) |
 | **Account** | `hyperscaled account check-balance [--wallet 0x...]` | Check Hyperliquid wallet balance |
 | **Account** | `hyperscaled account setup <wallet>` | Save wallet address to config |
 | **Config** | `hyperscaled config show` | Display current config |
@@ -107,5 +107,6 @@ Map their intent to the appropriate command(s) above. Examples:
 3. **Confirm before submitting trades**: Always show the user exactly what you're about to submit and ask for confirmation before running `hyperscaled trade submit`.
 4. **Missing parameters**: If the user's request is ambiguous or missing required params (size, side, price for limit orders), ask before proceeding.
 5. **Errors**: If a command fails, read the error message carefully. Common issues: wallet not configured (suggest `hyperscaled account setup`), insufficient balance, rule violations, pair not supported.
-6. **Format output clearly**: When showing positions, orders, or account info, present the data in a readable table or summary. Highlight PnL, unrealized gains/losses, and any risk warnings (high drawdown, approaching limits).
+6. **Format output clearly**: When showing positions, orders, or account info, present the data in a readable table or summary. Highlight PnL, unrealized gains/losses, and any risk warnings — specifically: (a) **intraday drawdown** approaching its limit (resets daily), (b) **EOD drawdown** approaching its limit (trailing from high-water mark), and (c) **current portfolio leverage** approaching the max allowed (challenge accounts have 1/4 the base cap vs funded accounts).
+8. **Account type matters**: `account info` reports `account_type` as `challenge` or `funded`. Challenge accounts have a lower max portfolio leverage cap (base / 4). Flag this when the user is near their leverage limit.
 7. **Never expose private keys**: Do not log, display, or store private keys. If a command needs one, instruct the user to set the appropriate environment variable.
