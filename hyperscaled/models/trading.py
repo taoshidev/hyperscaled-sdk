@@ -22,6 +22,7 @@ class Order(BaseModel):
     pair: str
     side: Literal["long", "short"]
     size: Decimal | None = None
+    filled_size: Decimal | None = None
     funded_equivalent_size: Decimal | None = None
     order_type: Literal["market", "limit"]
     status: Literal["filled", "partial", "pending", "cancelled", "open"]
@@ -30,6 +31,13 @@ class Order(BaseModel):
     scaling_ratio: Decimal | None = None
     take_profit: Decimal | None = None
     stop_loss: Decimal | None = None
+    trailing_stop: dict | None = None
+    tp_order_id: str | None = None
+    sl_order_id: str | None = None
+    trigger_status: Literal[
+        "not_requested", "pending_parent_fill", "placed", "partial_failure", "failed"
+    ] = "not_requested"
+    trigger_error: str | None = None
     created_at: datetime
 
 

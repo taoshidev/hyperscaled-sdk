@@ -33,6 +33,23 @@ def _render_order(order: Order) -> None:
         lines.append(f"[bold]Take Profit:[/bold]   ${order.take_profit:,.2f}")
     if order.stop_loss is not None:
         lines.append(f"[bold]Stop Loss:[/bold]     ${order.stop_loss:,.2f}")
+    if order.trailing_stop is not None:
+        if "trailing_percent" in order.trailing_stop:
+            lines.append(
+                f"[bold]Trailing SL:[/bold]   {order.trailing_stop['trailing_percent']:.1%}"
+            )
+        else:
+            lines.append(
+                f"[bold]Trailing SL:[/bold]   ${order.trailing_stop['trailing_value']:,.2f} trail"
+            )
+    if order.tp_order_id is not None:
+        lines.append(f"[bold]TP Order ID:[/bold]   {order.tp_order_id}")
+    if order.sl_order_id is not None:
+        lines.append(f"[bold]SL Order ID:[/bold]   {order.sl_order_id}")
+    if order.trigger_status not in ("not_requested", None):
+        lines.append(f"[bold]Trigger Status:[/bold] {order.trigger_status}")
+    if order.trigger_error is not None:
+        lines.append(f"[bold]Trigger Error:[/bold] {order.trigger_error}")
 
     style = "green" if order.status == "filled" else "yellow"
     console.print(Panel("\n".join(lines), title="Order Submitted", border_style=style))
@@ -91,6 +108,16 @@ def submit(
     price: float | None = typer.Option(None, help="Limit price (required for limit orders)"),
     take_profit: float | None = typer.Option(None, "--tp", help="Take profit price"),
     stop_loss: float | None = typer.Option(None, "--sl", help="Stop loss price"),
+    trailing_sl_percent: float | None = typer.Option(
+        None,
+        "--trailing-sl-percent",
+        help="Trailing stop loss as a percentage (e.g. 0.02 for 2%%)",
+    ),
+    trailing_sl_value: float | None = typer.Option(
+        None,
+        "--trailing-sl-value",
+        help="Trailing stop loss as an absolute value (e.g. 500 for $500 trail)",
+    ),
     usd: bool = typer.Option(
         False,
         "--usd",
@@ -109,6 +136,18 @@ def submit(
     from hyperscaled import HyperscaledClient
     from hyperscaled.exceptions import HyperscaledError, RuleViolationError
 
+    trailing_stop = None
+    if trailing_sl_percent is not None and trailing_sl_value is not None:
+        console.print(
+            "[red]Error:[/red] Specify only one of "
+            "--trailing-sl-percent or --trailing-sl-value"
+        )
+        raise typer.Exit(code=1)
+    if trailing_sl_percent is not None:
+        trailing_stop = {"trailing_percent": trailing_sl_percent}
+    elif trailing_sl_value is not None:
+        trailing_stop = {"trailing_value": trailing_sl_value}
+
     client = HyperscaledClient()
     client.open_sync()
     try:
@@ -121,6 +160,7 @@ def submit(
             take_profit=Decimal(str(take_profit)) if take_profit else None,
             stop_loss=Decimal(str(stop_loss)) if stop_loss else None,
             size_in_usd=usd,
+            trailing_stop=trailing_stop,
         )
         if json_output:
             typer.echo(json.dumps(order.model_dump(mode="json"), indent=2, default=str))  # type: ignore[union-attr]

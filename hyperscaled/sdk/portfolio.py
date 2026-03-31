@@ -433,16 +433,33 @@ class PortfolioClient:
         return _sync_or_async(self.exchange_positions_async())
 
     def _map_hl_order(self, raw: dict[str, Any]) -> Order:
-        """Map a Hyperliquid info API open-order dict to an SDK Order.
+        """Map a Hyperliquid open-order dict to an SDK Order.
 
-        The HL ``open_orders`` response returns dicts like::
+        Handles both regular limit orders and trigger orders (TP/SL).
+        The ``frontend_open_orders`` response includes richer trigger metadata::
 
-            {"coin": "BTC", "limitPx": "67000.0", "oid": 123456,
-             "side": "B", "sz": "0.001", "timestamp": 1710000000000}
+            {"coin": "BTC", "isTrigger": true, "triggerPx": "74741.0",
+             "orderType": "Take Profit Market", "reduceOnly": true, ...}
         """
         coin = str(raw.get("coin", ""))
         pair = f"{coin.upper()}-USDC" if coin else "UNKNOWN"
         side: str = "long" if raw.get("side") in ("B", "Buy", "buy") else "short"
+
+        is_trigger = bool(raw.get("isTrigger"))
+        order_type_str = str(raw.get("orderType", ""))
+
+        take_profit: Decimal | None = None
+        stop_loss: Decimal | None = None
+        mapped_order_type: str = "limit"
+
+        if is_trigger:
+            mapped_order_type = "market"
+            trigger_px = _decimal(raw.get("triggerPx")) if raw.get("triggerPx") else None
+            if trigger_px is not None:
+                if "Take Profit" in order_type_str:
+                    take_profit = trigger_px
+                elif "Stop" in order_type_str:
+                    stop_loss = trigger_px
 
         return Order(
             order_id=str(raw["oid"]) if raw.get("oid") is not None else None,
@@ -451,25 +468,29 @@ class PortfolioClient:
             side=side,
             size=_decimal(raw.get("sz")),
             funded_equivalent_size=None,
-            order_type="limit",
+            order_type=mapped_order_type,
             status="open",
             limit_price=_decimal(raw.get("limitPx")),
             fill_price=None,
             scaling_ratio=None,
-            take_profit=None,
-            stop_loss=None,
+            take_profit=take_profit,
+            stop_loss=stop_loss,
             created_at=_dt_from_ms(raw.get("timestamp", 0)),
         )
 
     async def open_orders_async(self) -> list[Order]:
-        """Return currently open orders by querying the Hyperliquid API directly."""
+        """Return currently open orders by querying the Hyperliquid API directly.
+
+        Uses ``frontend_open_orders`` to get richer trigger order metadata
+        needed to properly identify TP/SL orders.
+        """
         hl_address = self._resolve_wallet()
         hl_info_url = self._client.config.hl_info_url
 
         try:
             response = await self._client.http.post(
                 hl_info_url,
-                json={"type": "openOrders", "user": hl_address},
+                json={"type": "frontendOpenOrders", "user": hl_address},
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
