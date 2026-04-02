@@ -41,7 +41,7 @@ Use the **CLI** (`hyperscaled` command) for quick lookups and actions. Use the *
 | **Register** | `hyperscaled register status [--hl-wallet 0x...]` | Check registration status |
 | **Register** | `hyperscaled register poll [--hl-wallet 0x...] [--timeout 300]` | Poll until registration completes |
 | **Register** | `hyperscaled register balance [--private-key 0x...]` | Check Base USDC payment balance |
-| **Trade** | `hyperscaled trade submit <pair> <side> <size> <type> [--price P] [--take-profit TP] [--stop-loss SL] [--size-in-usd]` | Submit a trade |
+| **Trade** | `hyperscaled trade submit <pair> <side> <size> <type> [--price P] [--take-profit TP] [--stop-loss SL] [--trailing-sl-percent PCT] [--trailing-sl-value VAL] [--size-in-usd]` | Submit a trade with optional TP/SL trigger orders or trailing stop |
 | **Trade** | `hyperscaled trade cancel <order_id>` | Cancel an order |
 | **Trade** | `hyperscaled trade cancel-all` | Cancel all open orders |
 | **Positions** | `hyperscaled positions open` | Show open positions (from Vanta validator) |
@@ -58,6 +58,52 @@ Use the **CLI** (`hyperscaled` command) for quick lookups and actions. Use the *
 | **KYC** | `hyperscaled kyc status` | Check KYC verification status |
 | **KYC** | `hyperscaled kyc start` | Begin KYC verification |
 | **Info** | `hyperscaled info show` | Aggregated account summary |
+
+## TP/SL and trailing stop orders
+
+After a parent order fills, the SDK automatically places real Hyperliquid trigger orders for take profit and/or stop loss.
+
+**CLI — fixed TP/SL:**
+```bash
+# Long BTC with TP at 90000 and SL at 80000
+hyperscaled trade submit BTC-PERP buy 0.01 market --take-profit 90000 --stop-loss 80000
+
+# TP only
+hyperscaled trade submit ETH-PERP buy 0.5 market --take-profit 2200
+
+# SL only
+hyperscaled trade submit SOL-PERP sell 10 market --stop-loss 130
+```
+
+**CLI — trailing stop (% or absolute):**
+```bash
+# Trail 2% below fill price (long)
+hyperscaled trade submit BTC-PERP buy 0.01 market --trailing-sl-percent 0.02
+
+# Trail $2000 below fill price (long)
+hyperscaled trade submit BTC-PERP buy 0.01 market --trailing-sl-value 2000
+```
+
+**How it works:**
+- Both TP + SL: submitted as an OCO pair (`positionTpsl` grouping) — when one fires, the other auto-cancels.
+- Trigger prices are rounded to per-asset tick size automatically.
+- Trigger size is based on `filled_size` (actual fill), never the originally requested size.
+- If trigger placement fails, the parent order is still returned with `trigger_status="failed"` and `trigger_error` populated.
+
+**Managing TP/SL on existing positions (SDK):**
+```python
+async with HyperscaledClient() as client:
+    # Replace TP/SL on an open position
+    result = await client.trade.set_tp_sl_async("BTC", take_profit=92000, stop_loss=79000)
+
+    # Ratchet trailing stops as price moves (call periodically)
+    result = await client.trade.update_trailing_stops_async("BTC")
+```
+
+**Validation rules:**
+- LONG: `stop_loss < entry_price < take_profit`
+- SHORT: `take_profit < entry_price < stop_loss`
+- Trailing stop: exactly one of `trailing_percent` (0–1 exclusive) or `trailing_value` (> 0)
 
 ## SDK usage (for scripts)
 
@@ -93,6 +139,10 @@ Map their intent to the appropriate command(s) above. Examples:
 - "sell 1000 usd worth of BTC" -> `hyperscaled trade submit BTC-PERP sell 1000 market --size-in-usd`
 - "set a limit buy for SOL at 120" -> `hyperscaled trade submit SOL-PERP buy <size> limit --price 120` (ask for size if missing)
 - "cancel everything" -> `hyperscaled trade cancel-all`
+- "buy 0.01 BTC with TP at 90000 and SL at 80000" -> `hyperscaled trade submit BTC-PERP buy 0.01 market --take-profit 90000 --stop-loss 80000`
+- "long ETH with a 2% trailing stop" -> `hyperscaled trade submit ETH-PERP buy <size> market --trailing-sl-percent 0.02`
+- "set TP/SL on my BTC position" / "move my stop loss" -> use `client.trade.set_tp_sl_async()` (SDK) with new prices
+- "update my trailing stops" -> use `client.trade.update_trailing_stops_async()` (SDK)
 - "what can I trade" -> `hyperscaled rules supported-pairs`
 - "check my balance" -> `hyperscaled account check-balance`
 - "show me miners" / "funded accounts" -> `hyperscaled miners list`
