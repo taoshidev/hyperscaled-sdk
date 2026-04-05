@@ -662,6 +662,7 @@ class TradingClient:
         stop_loss: Decimal | None = None,
         size_in_usd: bool = False,
         trailing_stop: dict[str, Any] | None = None,
+        leverage: int | None = None,
     ) -> Order:
         """Submit an order and return translated funded-account execution info.
 
@@ -747,6 +748,17 @@ class TradingClient:
         # ── Place order via HL SDK ────────────────────────────
         exchange = self._get_exchange()
         try:
+            # Set leverage if explicitly requested by the trader.
+            # If not provided, HL uses whatever the trader already has configured.
+            if leverage is not None:
+                lev_result = await asyncio.to_thread(
+                    exchange.update_leverage, leverage, hl_name, True
+                )
+                if isinstance(lev_result, dict) and lev_result.get("status") != "ok":
+                    raise HyperscaledError(
+                        f"Failed to set {leverage}x leverage for {pair}: {lev_result}"
+                    )
+
             if order_type == "market":
                 result = await asyncio.to_thread(
                     exchange.market_open, hl_name, is_buy, float(coin_size)
@@ -839,12 +851,14 @@ class TradingClient:
         stop_loss: Decimal | None = None,
         size_in_usd: bool = False,
         trailing_stop: dict[str, Any] | None = None,
+        leverage: int | None = None,
     ) -> Order | Coroutine[Any, Any, Order]:
         """Submit an order (sync or async), following the pattern from AccountClient."""
         return _sync_or_async(
             self.submit_async(
                 pair, side, size, order_type, price, take_profit, stop_loss,
                 size_in_usd=size_in_usd, trailing_stop=trailing_stop,
+                leverage=leverage,
             )
         )
 
