@@ -85,20 +85,14 @@ class AccountClient:
     # ── Balance check (SDK-007) ──────────────────────────────
 
     async def _fetch_hl_balance(self, wallet_address: str) -> Decimal:
-        """Query the Hyperliquid info API for the wallet's total USDC equity.
+        """Query the Hyperliquid info API for the wallet's perps account value.
 
-        Combines perps clearinghouse account value with spot USDC balance
-        to reflect the full available equity.
+        Uses only the perps clearinghouse accountValue — this is the margin
+        that actually backs open positions and is the correct basis for
+        scaling calculations. Spot USDC is excluded as it is not perp collateral.
         """
         hl_info_url = self._client.config.hl_info_url
-
-        # ── Perps clearinghouse ──────────────────────────────
-        perps_equity = await self._fetch_perps_equity(hl_info_url, wallet_address)
-
-        # ── Spot USDC balance ────────────────────────────────
-        spot_usdc = await self._fetch_spot_usdc(hl_info_url, wallet_address)
-
-        return perps_equity + spot_usdc
+        return await self._fetch_perps_equity(hl_info_url, wallet_address)
 
     async def _fetch_perps_equity(self, hl_info_url: str, wallet_address: str) -> Decimal:
         """Return the perps clearinghouse account value."""
@@ -164,6 +158,17 @@ class AccountClient:
     ) -> BalanceStatus | Coroutine[Any, Any, BalanceStatus]:
         """Check balance (sync or async)."""
         return _sync_or_async(self.check_balance_async(wallet_address))
+
+    async def check_spot_balance_async(self, wallet_address: str | None = None) -> Decimal:
+        """Return the spot USDC balance for the configured wallet."""
+        resolved = self._resolve_wallet(wallet_address)
+        return await self._fetch_spot_usdc(self._client.config.hl_info_url, resolved)
+
+    def check_spot_balance(
+        self, wallet_address: str | None = None
+    ) -> Decimal | Coroutine[Any, Any, Decimal]:
+        """Check spot USDC balance (sync or async)."""
+        return _sync_or_async(self.check_spot_balance_async(wallet_address))
 
     # ── Account info ───────────────────────────────────────────
 
