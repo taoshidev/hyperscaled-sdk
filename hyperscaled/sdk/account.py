@@ -85,20 +85,22 @@ class AccountClient:
     # ── Balance check (SDK-007) ──────────────────────────────
 
     async def _fetch_hl_balance(self, wallet_address: str) -> Decimal:
-        """Query the Hyperliquid info API for the wallet's total USDC equity.
+        """Return total portfolio value per the Vanta translation spec:
 
-        Combines perps clearinghouse account value with spot USDC balance
-        to reflect the full available equity.
+            portfolio_value = perp.marginSummary.accountValue
+                            + (spot.USDC.total - spot.USDC.hold)
+
+        perp.marginSummary.accountValue already includes locked margin and
+        unrealized PnL. spot.USDC.hold is the portion of spot USDC locked as
+        perp collateral — subtracting it avoids double-counting with the perp
+        value. Together they represent the full economic value of the account.
         """
         hl_info_url = self._client.config.hl_info_url
-
-        # ── Perps clearinghouse ──────────────────────────────
-        perps_equity = await self._fetch_perps_equity(hl_info_url, wallet_address)
-
-        # ── Spot USDC balance ────────────────────────────────
-        spot_usdc = await self._fetch_spot_usdc(hl_info_url, wallet_address)
-
-        return perps_equity + spot_usdc
+        perp_value, spot_free = await asyncio.gather(
+            self._fetch_perps_equity(hl_info_url, wallet_address),
+            self._fetch_spot_usdc_free(hl_info_url, wallet_address),
+        )
+        return perp_value + spot_free
 
     async def _fetch_perps_equity(self, hl_info_url: str, wallet_address: str) -> Decimal:
         """Return the perps clearinghouse account value."""
@@ -122,7 +124,7 @@ class AccountClient:
         return Decimal(str(equity))
 
     async def _fetch_spot_usdc(self, hl_info_url: str, wallet_address: str) -> Decimal:
-        """Return the spot USDC balance (token 0)."""
+        """Return the raw spot USDC total (including held/locked amount)."""
         payload = {"type": "spotClearinghouseState", "user": wallet_address}
         try:
             response = await self._client.http.post(hl_info_url, json=payload)
@@ -134,6 +136,28 @@ class AccountClient:
         for balance in data.get("balances", []):
             if balance.get("coin") == "USDC":
                 return Decimal(str(balance.get("total", "0")))
+        return Decimal("0")
+
+    async def _fetch_spot_usdc_free(self, hl_info_url: str, wallet_address: str) -> Decimal:
+        """Return the free spot USDC: total minus the amount held as perp collateral.
+
+        spot.USDC.hold is the portion locked as margin for open positions.
+        It already appears in perp.marginSummary.accountValue, so subtracting
+        it here prevents double-counting in the portfolio value calculation.
+        """
+        payload = {"type": "spotClearinghouseState", "user": wallet_address}
+        try:
+            response = await self._client.http.post(hl_info_url, json=payload)
+            response.raise_for_status()
+        except httpx.HTTPError:
+            return Decimal("0")
+
+        data = response.json()
+        for balance in data.get("balances", []):
+            if balance.get("coin") == "USDC":
+                total = Decimal(str(balance.get("total", "0")))
+                hold = Decimal(str(balance.get("hold", "0")))
+                return max(Decimal("0"), total - hold)
         return Decimal("0")
 
     def _resolve_wallet(self, wallet_address: str | None = None) -> str:
@@ -164,6 +188,17 @@ class AccountClient:
     ) -> BalanceStatus | Coroutine[Any, Any, BalanceStatus]:
         """Check balance (sync or async)."""
         return _sync_or_async(self.check_balance_async(wallet_address))
+
+    async def check_spot_balance_async(self, wallet_address: str | None = None) -> Decimal:
+        """Return the free spot USDC (total minus amount held as perp collateral)."""
+        resolved = self._resolve_wallet(wallet_address)
+        return await self._fetch_spot_usdc_free(self._client.config.hl_info_url, resolved)
+
+    def check_spot_balance(
+        self, wallet_address: str | None = None
+    ) -> Decimal | Coroutine[Any, Any, Decimal]:
+        """Check spot USDC balance (sync or async)."""
+        return _sync_or_async(self.check_spot_balance_async(wallet_address))
 
     # ── Account info ───────────────────────────────────────────
 
