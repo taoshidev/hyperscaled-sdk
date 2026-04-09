@@ -282,7 +282,7 @@ class AccountClient:
         if not isinstance(challenge_period, dict):
             challenge_period = {}
         bucket = str(challenge_period.get("bucket", "")).upper()
-        account_type = "challenge" if "CHALLENGE" in bucket else "funded"
+        account_type = "funded" if "FUNDED" in bucket else "challenge"
 
         account_size = sub_info.get("account_size", 0) or 0
 
