@@ -46,7 +46,7 @@ dev = [
 hyperscaled = "hyperscaled.cli.main:app"
 
 [project.urls]
-Homepage = "https://hyperscaled.com"
+Homepage = "https://hyperscaled.trade"
 Repository = "https://github.com/hyperscaled/hyperscaled-sdk"
 
 [tool.ruff]
