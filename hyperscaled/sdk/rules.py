@@ -449,19 +449,84 @@ class RulesClient:
         requested_leverage = requested_notional / hl_balance
         max_position_notional = hl_balance * pair_max_leverage
         max_portfolio_notional = hl_balance * account_max_leverage
-        projected_exposure = current_hl_exposure + requested_notional
 
-        if requested_notional > max_position_notional or requested_leverage > pair_max_leverage:
-            raise LeverageLimitError(
-                f"Order size too large. Max position on your HL balance is "
-                f"${float(max_position_notional):,.2f} ({float(pair_max_leverage):.2f}x leverage). "
-                f"Requested ${float(requested_notional):,.2f} ({float(requested_leverage):.2f}x).",
-                rule_id=_RULE_IDS["leverage_limit"],
-                limit=str(pair_max_leverage),
-                actual_value=str(requested_leverage),
-                requested_leverage=float(requested_leverage),
-                max_leverage=float(pair_max_leverage),
+        # Fetch the existing HL position for this pair to detect reducing trades.
+        # A trade in the opposite direction of an existing position reduces exposure
+        # rather than adding it — it should not be blocked by leverage limits.
+        coin = str(pair_entry.get("trade_pair_id", "")).upper()
+        if coin.endswith("USD"):
+            coin = coin[:-3]
+
+        existing_pair_notional = Decimal("0")
+        existing_pair_side: str | None = None
+        try:
+            hl_info_url = self._client.config.hl_info_url
+            pos_resp = await self._client.http.post(
+                hl_info_url,
+                json={"type": "clearinghouseState", "user": wallet},
             )
+            pos_resp.raise_for_status()
+            for ap in pos_resp.json().get("assetPositions", []):
+                p = ap.get("position", {})
+                if p.get("coin", "").upper() == coin:
+                    szi = Decimal(str(p.get("szi", "0")))
+                    if szi != 0:
+                        existing_pair_side = "long" if szi > 0 else "short"
+                        pos_val = p.get("positionValue")
+                        existing_pair_notional = (
+                            abs(Decimal(str(pos_val))) if pos_val is not None
+                            else abs(szi) * validation_price
+                        )
+                    break
+        except Exception:
+            pass  # If HL is unreachable, fall through to conservative check
+
+        is_reducing = (
+            existing_pair_notional > 0
+            and existing_pair_side is not None
+            and existing_pair_side != side.lower()
+        )
+
+        if is_reducing:
+            # Amount of the existing position actually closed by this order
+            closed_notional = min(requested_notional, existing_pair_notional)
+            # Any excess beyond the existing position opens a new position (flip)
+            net_new_notional = max(Decimal("0"), requested_notional - existing_pair_notional)
+
+            # Only validate leverage for any net new position opened (flip scenario)
+            if net_new_notional > 0:
+                net_leverage = net_new_notional / hl_balance
+                if net_new_notional > max_position_notional or net_leverage > pair_max_leverage:
+                    raise LeverageLimitError(
+                        f"Order would flip the position and open a new position larger than allowed. "
+                        f"Max position on your HL balance is "
+                        f"${float(max_position_notional):,.2f} ({float(pair_max_leverage):.2f}x leverage). "
+                        f"Net new position ${float(net_new_notional):,.2f} ({float(net_leverage):.2f}x).",
+                        rule_id=_RULE_IDS["leverage_limit"],
+                        limit=str(pair_max_leverage),
+                        actual_value=str(net_leverage),
+                        requested_leverage=float(net_leverage),
+                        max_leverage=float(pair_max_leverage),
+                    )
+
+            projected_exposure = max(
+                Decimal("0"),
+                current_hl_exposure - closed_notional + net_new_notional,
+            )
+        else:
+            projected_exposure = current_hl_exposure + requested_notional
+
+            if requested_notional > max_position_notional or requested_leverage > pair_max_leverage:
+                raise LeverageLimitError(
+                    f"Order size too large. Max position on your HL balance is "
+                    f"${float(max_position_notional):,.2f} ({float(pair_max_leverage):.2f}x leverage). "
+                    f"Requested ${float(requested_notional):,.2f} ({float(requested_leverage):.2f}x).",
+                    rule_id=_RULE_IDS["leverage_limit"],
+                    limit=str(pair_max_leverage),
+                    actual_value=str(requested_leverage),
+                    requested_leverage=float(requested_leverage),
+                    max_leverage=float(pair_max_leverage),
+                )
 
         if projected_exposure > max_portfolio_notional:
             raise ExposureLimitError(
