@@ -189,6 +189,12 @@ def trading_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Hyperscal
         return_value=TradeValidation(valid=True, violations=[])
     )
 
+    # Seed HL szDecimals so tests don't need to mock the `meta` endpoint.
+    # Values match Hyperliquid perp metadata as of 2026-04.
+    client.trade._sz_decimals_cache.update({
+        "BTC": 5, "ETH": 4, "SOL": 3, "XRP": 1, "DOGE": 0, "ADA": 1,
+    })
+
     return client
 
 
@@ -339,41 +345,48 @@ class TestComputeTrailingSl:
 
 class TestTriggerPriceRounding:
     def test_trigger_price_rounding_integer_btc(self) -> None:
-        client = TradingClient.__new__(TradingClient)
-        result = client._round_trigger_price("BTC", Decimal("81507.6"))
+        # BTC szDecimals = 5 → max perp price decimals = 0
+        result = TradingClient._round_trigger_price(Decimal("81507.6"), sz_decimals=5)
         assert result == Decimal("81508")
 
     @pytest.mark.parametrize(
-        ("asset", "input_price", "expected"),
+        ("sz_decimals", "input_price", "expected"),
         [
-            ("BTC", Decimal("67946.4"), Decimal("67946")),
-            ("BTC", Decimal("67946.5"), Decimal("67947")),
-            ("ETH", Decimal("3456.78"), Decimal("3456.8")),
-            ("SOL", Decimal("145.678"), Decimal("145.68")),
-            ("XRP", Decimal("0.54321"), Decimal("0.5432")),
-            ("DOGE", Decimal("0.123456"), Decimal("0.12346")),
-            ("ADA", Decimal("0.45678"), Decimal("0.4568")),
+            # BTC: szDecimals=5, 5-5=0 perp decimals
+            (5, Decimal("67946.4"), Decimal("67946")),
+            (5, Decimal("67946.5"), Decimal("67947")),
+            # ETH: szDecimals=4, 5-4=1 perp decimal
+            (4, Decimal("3456.78"), Decimal("3456.8")),
+            # SOL: szDecimals=3, 5-3=2 perp decimals
+            (3, Decimal("145.678"), Decimal("145.68")),
+            # XRP/ADA: szDecimals=1, 5-1=4 perp decimals
+            (1, Decimal("0.54321"), Decimal("0.5432")),
+            (1, Decimal("0.45678"), Decimal("0.4568")),
+            # DOGE: szDecimals=0, 5-0=5 perp decimals
+            (0, Decimal("0.123456"), Decimal("0.12346")),
         ],
     )
-    def test_trigger_price_quantization_all_pairs(
-        self, asset: str, input_price: Decimal, expected: Decimal
+    def test_trigger_price_quantization(
+        self, sz_decimals: int, input_price: Decimal, expected: Decimal
     ) -> None:
-        client = TradingClient.__new__(TradingClient)
-        assert client._round_trigger_price(asset, input_price) == expected
+        assert TradingClient._round_trigger_price(input_price, sz_decimals) == expected
 
-    def test_trigger_price_rounding_unknown_asset_raises(self) -> None:
-        client = TradingClient.__new__(TradingClient)
-        with pytest.raises(HyperscaledError, match="No trigger price precision"):
-            client._round_trigger_price("LINK", Decimal("15.50"))
+    def test_trigger_price_significant_figure_limit(self) -> None:
+        # A 6-digit integer price must round to an integer regardless of szDecimals
+        # because HL caps perp prices at 6 significant figures for non-integers.
+        result = TradingClient._round_trigger_price(Decimal("123456.789"), sz_decimals=2)
+        assert result == result.to_integral_value()
 
-    def test_trigger_price_rounding_per_asset(self) -> None:
-        client = TradingClient.__new__(TradingClient)
-        for asset, decimals in TradingClient.TRIGGER_PRICE_DECIMALS.items():
-            result = client._round_trigger_price(asset, Decimal("12345.6789012345"))
-            if decimals == 0:
-                assert result == result.to_integral_value()
-            else:
-                assert abs(result.as_tuple().exponent) <= decimals  # type: ignore[operator]
+    def test_allowed_decimals_below_one(self) -> None:
+        # Sub-$1 prices are bound by the perp-decimal cap, not significant figures.
+        assert (
+            TradingClient._hl_allowed_price_decimals(Decimal("0.04321"), sz_decimals=1)
+            == 4
+        )
+        assert (
+            TradingClient._hl_allowed_price_decimals(Decimal("0.00012"), sz_decimals=0)
+            == 5
+        )
 
 
 # ── Submit with TP/SL triggers ────────────────────────────────

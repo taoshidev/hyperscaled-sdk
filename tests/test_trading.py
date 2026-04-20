@@ -13,7 +13,7 @@ from hyperscaled.models.account import BalanceStatus
 from hyperscaled.models.rules import TradeValidation
 from hyperscaled.models.trading import Order
 from hyperscaled.sdk.client import HyperscaledClient
-from hyperscaled.sdk.pairs import normalize_pair_to_hl, normalize_pair_to_vanta, validate_pair
+from hyperscaled.sdk.pairs import normalize_pair_to_hl, normalize_pair_to_vanta
 
 VALID_ADDRESS = "0x" + "a1" * 20
 
@@ -94,6 +94,11 @@ def trading_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Hyperscal
         return_value=TradeValidation(valid=True, violations=[])
     )
 
+    # Seed HL szDecimals so tests don't need to mock the `meta` endpoint.
+    client.trade._sz_decimals_cache.update({
+        "BTC": 5, "ETH": 4, "SOL": 3, "XRP": 1, "DOGE": 0, "ADA": 1,
+    })
+
     return client
 
 
@@ -101,25 +106,26 @@ def trading_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Hyperscal
 
 
 class TestPairUtilities:
-    def test_validate_pair_valid(self) -> None:
-        for pair in ("BTC-USDC", "eth-usdc", "Sol-Usdc"):
-            validate_pair(pair)
-
-    def test_validate_pair_invalid(self) -> None:
-        with pytest.raises(ValueError, match="Unsupported pair"):
-            validate_pair("LINK-USDC")
-
-    def test_validate_pair_malformed(self) -> None:
-        with pytest.raises(ValueError, match="Unsupported pair"):
-            validate_pair("BTCUSDC")
-
     def test_normalize_pair_to_hl(self) -> None:
         assert normalize_pair_to_hl("BTC-USDC") == "BTC"
         assert normalize_pair_to_hl("eth-usdc") == "ETH"
+        assert normalize_pair_to_hl("BTC/USD") == "BTC"
+        assert normalize_pair_to_hl("BTCUSD") == "BTC"
+        assert normalize_pair_to_hl("AAPL") == "AAPL"
+        assert normalize_pair_to_hl("EURUSD") == "EUR"
 
     def test_normalize_pair_to_vanta(self) -> None:
         assert normalize_pair_to_vanta("BTC-USDC") == "BTCUSD"
         assert normalize_pair_to_vanta("eth-usdc") == "ETHUSD"
+        assert normalize_pair_to_vanta("BTC/USD") == "BTCUSD"
+        assert normalize_pair_to_vanta("BTCUSD") == "BTCUSD"
+        assert normalize_pair_to_vanta("AAPL") == "AAPL"
+
+    def test_normalize_rejects_empty(self) -> None:
+        with pytest.raises(ValueError, match="non-empty"):
+            normalize_pair_to_hl("  ")
+        with pytest.raises(ValueError, match="non-empty"):
+            normalize_pair_to_vanta("")
 
 
 # ── Input validation ─────────────────────────────────────────

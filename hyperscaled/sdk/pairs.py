@@ -1,42 +1,63 @@
-"""Pair normalization and validation utilities.
+"""Pair normalization utilities.
 
-The SDK's public API uses ``BTC-USDC``, the Hyperliquid SDK wants ``BTC``,
-and Vanta internals use ``BTCUSD``.  This module keeps the mapping in one place.
+The SDK accepts several pair formats and normalizes them to the target
+needed by each downstream system:
+
+- SDK format: ``BTC-USDC``
+- Validator format: ``BTCUSD``
+- Slash format: ``BTC/USD``
+- Raw asset name: ``BTC``, ``AAPL``
+
+The canonical, up-to-date list of allowed pairs is served by the validator
+at ``GET /trade-pairs`` and is exposed via ``HyperscaledClient.rules``
+(see ``supported_pairs()`` and ``validate_trade()``).
 """
 
 from __future__ import annotations
 
-SUPPORTED_PAIRS = frozenset({
-    "BTC-USDC",
-    "ETH-USDC",
-    "SOL-USDC",
-    "XRP-USDC",
-    "DOGE-USDC",
-    "ADA-USDC",
-})
 
-
-def validate_pair(pair: str) -> None:
-    """Raise ``ValueError`` if *pair* is not in the supported set."""
-    normalized = pair.upper()
-    if normalized not in SUPPORTED_PAIRS:
-        raise ValueError(
-            f"Unsupported pair {pair!r}. "
-            f"Supported pairs: {', '.join(sorted(SUPPORTED_PAIRS))}"
-        )
+def _clean(pair: str) -> str:
+    raw = pair.strip().upper()
+    if not raw:
+        raise ValueError("Pair must be a non-empty string")
+    return raw
 
 
 def normalize_pair_to_hl(pair: str) -> str:
-    """Convert SDK pair format to Hyperliquid asset name.
+    """Return the Hyperliquid asset name for *pair*.
 
-    ``'BTC-USDC'`` → ``'BTC'``
+    Examples
+    --------
+    ``'BTC-USDC'`` → ``'BTC'``, ``'BTC/USD'`` → ``'BTC'``,
+    ``'BTCUSD'`` → ``'BTC'``, ``'AAPL'`` → ``'AAPL'``.
     """
-    return pair.split("-")[0].upper()
+    raw = _clean(pair)
+    if "/" in raw:
+        return raw.split("/", 1)[0]
+    if "-" in raw:
+        return raw.split("-", 1)[0]
+    if raw.endswith("USDC") and raw != "USDC":
+        return raw[:-4]
+    if raw.endswith("USD") and raw != "USD":
+        return raw[:-3]
+    return raw
 
 
 def normalize_pair_to_vanta(pair: str) -> str:
-    """Convert SDK pair format to Vanta ``trade_pair_id``.
+    """Return the validator ``trade_pair_id`` for *pair*.
 
-    ``'BTC-USDC'`` → ``'BTCUSD'``
+    Examples
+    --------
+    ``'BTC-USDC'`` → ``'BTCUSD'``, ``'BTC/USD'`` → ``'BTCUSD'``,
+    ``'BTCUSD'`` → ``'BTCUSD'``, ``'AAPL'`` → ``'AAPL'``.
     """
-    return f"{pair.split('-')[0].upper()}USD"
+    raw = _clean(pair)
+    if "/" in raw:
+        base, quote = raw.split("/", 1)
+        return f"{base}{quote}"
+    if "-" in raw:
+        base, quote = raw.split("-", 1)
+        if quote == "USDC":
+            quote = "USD"
+        return f"{base}{quote}"
+    return raw

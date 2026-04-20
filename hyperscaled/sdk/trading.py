@@ -18,7 +18,7 @@ import httpx
 from hyperscaled.exceptions import HyperscaledError, InsufficientBalanceError
 from hyperscaled.models.account import MINIMUM_BALANCE
 from hyperscaled.models.trading import Order
-from hyperscaled.sdk.pairs import SUPPORTED_PAIRS, normalize_pair_to_hl
+from hyperscaled.sdk.pairs import normalize_pair_to_hl
 
 if TYPE_CHECKING:
     from hyperscaled.sdk.client import HyperscaledClient
@@ -50,6 +50,7 @@ class TradingClient:
         self._exchange: Any = None
         self._info: Any = None
         self._trailing_state: dict[str, dict[str, Any]] = {}
+        self._sz_decimals_cache: dict[str, int] = {}
 
     def _get_exchange(self) -> Any:
         """Lazy-initialize the HL Exchange from the configured private key."""
@@ -114,6 +115,10 @@ class TradingClient:
 
     async def _fetch_sz_decimals(self, hl_name: str) -> int:
         """Fetch the szDecimals for a perp asset from Hyperliquid metadata."""
+        cached = self._sz_decimals_cache.get(hl_name)
+        if cached is not None:
+            return cached
+
         hl_info_url = self._client.config.hl_info_url
         try:
             response = await self._client.http.post(hl_info_url, json={"type": "meta"})
@@ -124,7 +129,9 @@ class TradingClient:
         payload = response.json()
         for asset in payload.get("universe", []):
             if asset.get("name") == hl_name:
-                return int(asset.get("szDecimals", 0))
+                decimals = int(asset.get("szDecimals", 0))
+                self._sz_decimals_cache[hl_name] = decimals
+                return decimals
         raise HyperscaledError(f"Asset {hl_name} not found in Hyperliquid metadata")
 
     @staticmethod
@@ -155,30 +162,35 @@ class TradingClient:
 
     @staticmethod
     def _display_pair_from_hl_name(name: str) -> str:
-        """Map Hyperliquid asset names back to the SDK pair format when possible."""
-        pair = f"{name.upper()}-USDC"
-        return pair if pair in SUPPORTED_PAIRS else name.upper()
+        """Render a Hyperliquid asset name as the SDK pair format for display."""
+        return f"{name.upper()}-USDC"
 
-    # Number of decimal places the exchange accepts for trigger prices.
-    # Validated against live exchange behavior (spike 2026-03-31).
-    TRIGGER_PRICE_DECIMALS: dict[str, int] = {
-        "BTC": 0,
-        "ETH": 1,
-        "SOL": 2,
-        "XRP": 4,
-        "DOGE": 5,
-        "ADA": 4,
-    }
+    # Hyperliquid perp price format: at most 5 decimal places and at most 6
+    # significant figures (integer prices exempt).  Decimals allowed =
+    # min(5 - szDecimals, 6 - integer_digits) for prices >= 1; for sub-$1
+    # prices the perp-decimal cap is the binding constraint.
+    _HL_MAX_PERP_PRICE_DECIMALS = 5
+    _HL_MAX_PERP_PRICE_SIGFIGS = 6
 
-    def _round_trigger_price(self, hl_name: str, price: Decimal) -> Decimal:
-        """Round a trigger price to the asset's accepted price tick."""
-        decimals = self.TRIGGER_PRICE_DECIMALS.get(hl_name)
-        if decimals is None:
-            raise HyperscaledError(
-                f"No trigger price precision defined for {hl_name}. "
-                f"Add the asset to TRIGGER_PRICE_DECIMALS after verifying "
-                f"the exchange's accepted tick size."
+    @staticmethod
+    def _hl_allowed_price_decimals(price: Decimal, sz_decimals: int) -> int:
+        """Compute the decimal places Hyperliquid accepts for a perp trigger price."""
+        max_perp_decimals = max(
+            0, TradingClient._HL_MAX_PERP_PRICE_DECIMALS - sz_decimals
+        )
+        abs_price = abs(price)
+        if abs_price >= 1:
+            int_digits = len(str(int(abs_price)))
+            sigfig_decimals = max(
+                0, TradingClient._HL_MAX_PERP_PRICE_SIGFIGS - int_digits
             )
+            return min(max_perp_decimals, sigfig_decimals)
+        return max_perp_decimals
+
+    @staticmethod
+    def _round_trigger_price(price: Decimal, sz_decimals: int) -> Decimal:
+        """Round a trigger price to Hyperliquid's accepted tick for *sz_decimals*."""
+        decimals = TradingClient._hl_allowed_price_decimals(price, sz_decimals)
         if decimals == 0:
             return price.quantize(Decimal("1"), rounding="ROUND_HALF_UP")
         quant = Decimal(10) ** -decimals
@@ -311,13 +323,14 @@ class TradingClient:
         exchange = self._get_exchange()
         close_is_buy = not parent_is_buy
 
+        sz_decimals = await self._fetch_sz_decimals(hl_name)
         tp_px = (
-            float(self._round_trigger_price(hl_name, take_profit))
+            float(self._round_trigger_price(take_profit, sz_decimals))
             if take_profit is not None
             else None
         )
         sl_px = (
-            float(self._round_trigger_price(hl_name, stop_loss))
+            float(self._round_trigger_price(stop_loss, sz_decimals))
             if stop_loss is not None
             else None
         )
@@ -1171,7 +1184,8 @@ class TradingClient:
             # failed attempt can be retried on the next poll.
             exchange = self._get_exchange()
             close_is_buy = side == "short"
-            rounded_sl = float(self._round_trigger_price(hl_name, new_sl))
+            sz_decimals = await self._fetch_sz_decimals(hl_name)
+            rounded_sl = float(self._round_trigger_price(new_sl, sz_decimals))
             try:
                 result = await asyncio.to_thread(
                     exchange.order,
