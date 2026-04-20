@@ -28,7 +28,7 @@ class TestConfigModel:
         assert config.account.entity_miner == ""
         assert config.account.funded_account_id == ""
         assert config.account.kyc_status == "not_started"
-        assert config.api.hyperscaled_base_url == "https://api.hyperscaled.com"
+        assert config.api.hyperscaled_base_url == "https://www.hyperscaled.trade"
         assert config.api.validator_api_url == "http://34.187.154.219:48888"
 
     def test_valid_address_accepted(self) -> None:

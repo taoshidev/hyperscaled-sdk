@@ -31,7 +31,7 @@ class TestConstruction:
         monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", tmp_path / "config.toml")
         client = HyperscaledClient()
         assert client.config.wallet.hl_address == ""
-        assert client.config.api.hyperscaled_base_url == "https://api.hyperscaled.com"
+        assert client.config.api.hyperscaled_base_url == "https://www.hyperscaled.trade"
         assert client.config.api.validator_api_url == "http://34.187.154.219:48888"
 
     def test_constructor_overrides_config(
