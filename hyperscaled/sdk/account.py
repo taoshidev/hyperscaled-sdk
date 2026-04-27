@@ -393,12 +393,15 @@ class AccountClient:
         hl_address = self._resolve_wallet_for_validator()
         raw_limits = await self._fetch_limits(hl_address)
         max_portfolio_usd = float(raw_limits.get("max_portfolio_usd", 0) or 0)
+        max_position_per_pair_usd = float(raw_limits.get("max_position_per_pair_usd", 0) or 0)
         acct_size = float(raw_limits.get("account_size", 1) or 1)
         account_level = max_portfolio_usd / acct_size if acct_size > 0 else 1.0
 
         return LeverageLimits(
             account_level=account_level,
             position_level=position_level,
+            max_position_per_pair_usd=max_position_per_pair_usd,
+            max_portfolio_usd=max_portfolio_usd,
         )
 
     def limits(self) -> LeverageLimits | Coroutine[Any, Any, LeverageLimits]:
