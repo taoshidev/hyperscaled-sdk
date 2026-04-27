@@ -387,7 +387,6 @@ class RulesClient:
         size: Decimal,
         order_type: str,
         price: Decimal | None = None,
-        size_in_usd: bool = False,
     ) -> TradeValidation:
         """Validate a proposed trade against validator-backed pair and account rules."""
         allowed_pairs = await self._fetch_trade_pairs()
@@ -454,12 +453,8 @@ class RulesClient:
             max_portfolio_notional / hl_balance if hl_balance > 0 else Decimal("1")
         )
 
-        if size_in_usd:
-            requested_notional = abs(size)
-            validation_price = price if price is not None else await self._fetch_hl_mid_price(pair_entry)
-        else:
-            validation_price = price if price is not None else await self._fetch_hl_mid_price(pair_entry)
-            requested_notional = abs(size) * validation_price
+        validation_price = price if price is not None else await self._fetch_hl_mid_price(pair_entry)
+        requested_notional = abs(size) * validation_price
 
         # Fetch the existing HL position for this pair to detect reducing trades.
         # A trade in the opposite direction of an existing position reduces exposure
@@ -578,9 +573,6 @@ class RulesClient:
         size: Decimal,
         order_type: str,
         price: Decimal | None = None,
-        size_in_usd: bool = False,
     ) -> TradeValidation | Coroutine[Any, Any, TradeValidation]:
         """Validate a trade synchronously or asynchronously."""
-        return _sync_or_async(
-            self.validate_trade_async(pair, side, size, order_type, price, size_in_usd)
-        )
+        return _sync_or_async(self.validate_trade_async(pair, side, size, order_type, price))
