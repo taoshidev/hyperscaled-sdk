@@ -19,7 +19,6 @@ from hyperscaled.exceptions import (
     LeverageLimitError,
     UnsupportedPairError,
 )
-from hyperscaled.models.account import MINIMUM_BALANCE
 from hyperscaled.models.rules import Rule, TradeValidation
 from hyperscaled.sdk.client import _run_sync
 
@@ -412,7 +411,7 @@ class RulesClient:
         self._assert_account_status(dashboard)
         self._assert_drawdown(dashboard)
 
-        _funded_balance, _current_funded_exposure, _account_size, in_challenge = self._account_context(dashboard)
+        _funded_balance, _current_funded_exposure, _account_size, _in_challenge = self._account_context(dashboard)
         if _funded_balance <= 0:
             raise HyperscaledError("Validator dashboard reported a non-positive funded balance.")
 
@@ -430,6 +429,7 @@ class RulesClient:
                 limit=str(balance_status.minimum_required),
                 actual_value=str(hl_balance),
                 balance=hl_balance,
+                minimum_required=balance_status.minimum_required,
             )
 
         # Current HL exposure = hl_balance * total_leverage (NL from validator)
@@ -446,12 +446,15 @@ class RulesClient:
         max_portfolio_notional = _decimal(limits.get("max_portfolio_usd"))
 
         # Per-pair leverage is still used for error messages and flip detection.
-        pair_max_leverage = max_position_notional / hl_balance if hl_balance > 0 else Decimal("1")
-        account_max_leverage = max_portfolio_notional / hl_balance if hl_balance > 0 else Decimal("1")
+        pair_max_leverage = (
+            max_position_notional / hl_balance if hl_balance > 0 else Decimal("1")
+        )
+        account_max_leverage = (
+            max_portfolio_notional / hl_balance if hl_balance > 0 else Decimal("1")
+        )
 
         validation_price = price if price is not None else await self._fetch_hl_mid_price(pair_entry)
         requested_notional = abs(size) * validation_price
-        requested_leverage = requested_notional / hl_balance
 
         # Fetch the existing HL position for this pair to detect reducing trades.
         # A trade in the opposite direction of an existing position reduces exposure
@@ -522,15 +525,25 @@ class RulesClient:
             # Cumulative pair position = existing (same direction) + new order.
             # Both must be checked against the per-pair limit, not just the new order.
             projected_pair_notional = existing_pair_notional + requested_notional
-            projected_pair_leverage = projected_pair_notional / hl_balance if hl_balance > 0 else Decimal("0")
+            projected_pair_leverage = (
+                projected_pair_notional / hl_balance if hl_balance > 0 else Decimal("0")
+            )
 
-            if projected_pair_notional > max_position_notional or projected_pair_leverage > pair_max_leverage:
+            if (
+                projected_pair_notional > max_position_notional
+                or projected_pair_leverage > pair_max_leverage
+            ):
+                pair_lim = float(max_position_notional)
+                pair_lev = float(pair_max_leverage)
+                proj_n = float(projected_pair_notional)
+                proj_l = float(projected_pair_leverage)
+                exist_n = float(existing_pair_notional)
+                req_n = float(requested_notional)
                 raise LeverageLimitError(
                     f"Order size too large. Max position per pair is "
-                    f"${float(max_position_notional):,.2f} ({float(pair_max_leverage):.2f}x leverage). "
-                    f"Existing position ${float(existing_pair_notional):,.2f} + "
-                    f"new order ${float(requested_notional):,.2f} = "
-                    f"${float(projected_pair_notional):,.2f} ({float(projected_pair_leverage):.2f}x).",
+                    f"${pair_lim:,.2f} ({pair_lev:.2f}x leverage). "
+                    f"Existing ${exist_n:,.2f} + new ${req_n:,.2f} = "
+                    f"${proj_n:,.2f} ({proj_l:.2f}x).",
                     rule_id=_RULE_IDS["leverage_limit"],
                     limit=str(pair_max_leverage),
                     actual_value=str(projected_pair_leverage),

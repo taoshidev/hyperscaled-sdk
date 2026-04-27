@@ -302,8 +302,12 @@ class AccountClient:
         # Max portfolio leverage — derived from validator limits endpoint
         raw_limits = await self._fetch_limits(hl_address)
         max_portfolio_usd = Decimal(str(raw_limits.get("max_portfolio_usd", 0) or 0))
-        raw_account_size = Decimal(str(raw_limits.get("account_size", account_size) or account_size or 1))
-        max_portfolio_leverage = max_portfolio_usd / raw_account_size if raw_account_size > 0 else Decimal("1")
+        raw_account_size = Decimal(
+            str(raw_limits.get("account_size", account_size) or account_size or 1)
+        )
+        max_portfolio_leverage = (
+            max_portfolio_usd / raw_account_size if raw_account_size > 0 else Decimal("1")
+        )
 
         # Build per-pair leverage from trade pairs
         leverage_limits = await self.limits_async()
@@ -313,7 +317,11 @@ class AccountClient:
             account_type=account_type,  # type: ignore[arg-type]
             funded_account_size=int(account_size),
             hl_wallet_address=hl_address,
-            payout_wallet_address=sub_info.get("payout_address") or self._client.config.wallet.payout_address or "",
+            payout_wallet_address=(
+                sub_info.get("payout_address")
+                or self._client.config.wallet.payout_address
+                or ""
+            ),
             entity_miner=str(sub_info.get("asset_class", "")),
             current_drawdown=current_drawdown,
             max_drawdown_limit=max_drawdown,
