@@ -510,15 +510,22 @@ class RulesClient:
         else:
             projected_exposure = current_hl_exposure + requested_notional
 
-            if requested_notional > max_position_notional or requested_leverage > pair_max_leverage:
+            # Cumulative pair position = existing (same direction) + new order.
+            # Both must be checked against the per-pair limit, not just the new order.
+            projected_pair_notional = existing_pair_notional + requested_notional
+            projected_pair_leverage = projected_pair_notional / hl_balance if hl_balance > 0 else Decimal("0")
+
+            if projected_pair_notional > max_position_notional or projected_pair_leverage > pair_max_leverage:
                 raise LeverageLimitError(
-                    f"Order size too large. Max position on your HL balance is "
+                    f"Order size too large. Max position per pair is "
                     f"${float(max_position_notional):,.2f} ({float(pair_max_leverage):.2f}x leverage). "
-                    f"Requested ${float(requested_notional):,.2f} ({float(requested_leverage):.2f}x).",
+                    f"Existing position ${float(existing_pair_notional):,.2f} + "
+                    f"new order ${float(requested_notional):,.2f} = "
+                    f"${float(projected_pair_notional):,.2f} ({float(projected_pair_leverage):.2f}x).",
                     rule_id=_RULE_IDS["leverage_limit"],
                     limit=str(pair_max_leverage),
-                    actual_value=str(requested_leverage),
-                    requested_leverage=float(requested_leverage),
+                    actual_value=str(projected_pair_leverage),
+                    requested_leverage=float(projected_pair_leverage),
                     max_leverage=float(pair_max_leverage),
                 )
 
