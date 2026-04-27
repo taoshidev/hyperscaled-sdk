@@ -19,7 +19,6 @@ from hyperscaled.exceptions import (
     LeverageLimitError,
     UnsupportedPairError,
 )
-from hyperscaled.models.account import MINIMUM_BALANCE
 from hyperscaled.models.rules import Rule, TradeValidation
 from hyperscaled.sdk.client import _run_sync
 
@@ -30,14 +29,8 @@ T = TypeVar("T")
 
 _TRADE_PAIRS_PATH = "/trade-pairs"
 _HL_DASHBOARD_PATH = "/hl-traders/{hl_address}"
+_HL_LIMITS_PATH = "/hl-traders/{hl_address}/limits"
 _HL_INFO_URL_DEFAULT = "https://api.hyperliquid.xyz/info"
-_PORTFOLIO_LEVERAGE_CAP: dict[str, Decimal] = {
-    "crypto": Decimal("5"),
-    "forex": Decimal("20"),
-    "indices": Decimal("10"),
-    "equities": Decimal("2"),
-}
-_CHALLENGE_LEVERAGE_DIVISOR = Decimal("4")
 _RULE_IDS = {
     "pair_unsupported": "SDK012_PAIR_UNSUPPORTED",
     "pair_halted": "SDK012_PAIR_HALTED",
@@ -178,6 +171,21 @@ class RulesClient:
         ):
             raise HyperscaledError("Validator dashboard response has unexpected shape")
         return payload["dashboard"]
+
+    async def _fetch_limits(self, hl_address: str) -> dict[str, Any]:
+        """Return trader-specific limits from the validator."""
+        path = _HL_LIMITS_PATH.format(hl_address=hl_address)
+        try:
+            response = await self._client.validator_http.get(path)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise HyperscaledError(
+                f"Failed to fetch trader limits: "
+                f"{exc.response.status_code} {exc.response.reason_phrase}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise HyperscaledError(f"Failed to fetch trader limits: {exc}") from exc
+        return response.json()
 
     async def _fetch_hl_mid_price(self, pair: dict[str, Any]) -> Decimal:
         """Fetch the current Hyperliquid mid price for a crypto pair."""
@@ -338,7 +346,6 @@ class RulesClient:
         allowed_pairs = await self._fetch_trade_pairs()
         rules: list[Rule] = []
 
-        seen_categories: set[str] = set()
         for entry in allowed_pairs:
             sdk_pair = _sdk_display_pair(entry)
             pair_id = str(entry.get("trade_pair_id", sdk_pair))
@@ -366,18 +373,6 @@ class RulesClient:
                 )
             )
 
-            if category not in seen_categories and category in _PORTFOLIO_LEVERAGE_CAP:
-                seen_categories.add(category)
-                rules.append(
-                    Rule(
-                        rule_id=f"{_RULE_IDS['account_max_leverage']}::{category.upper()}",
-                        category="leverage",
-                        description=f"Maximum portfolio leverage for {category} accounts.",
-                        current_value=None,
-                        limit=str(_PORTFOLIO_LEVERAGE_CAP[category]),
-                        applies_to=category,
-                    )
-                )
 
         return rules
 
@@ -416,7 +411,7 @@ class RulesClient:
         self._assert_account_status(dashboard)
         self._assert_drawdown(dashboard)
 
-        _funded_balance, _current_funded_exposure, _account_size, in_challenge = self._account_context(dashboard)
+        _funded_balance, _current_funded_exposure, _account_size, _in_challenge = self._account_context(dashboard)
         if _funded_balance <= 0:
             raise HyperscaledError("Validator dashboard reported a non-positive funded balance.")
 
@@ -426,6 +421,16 @@ class RulesClient:
         hl_balance = balance_status.balance
         if hl_balance <= 0:
             raise HyperscaledError("Hyperliquid balance is zero — deposit funds before trading.")
+        if not balance_status.meets_minimum:
+            raise InsufficientBalanceError(
+                f"HL balance ${float(hl_balance):,.2f} is below the "
+                f"${float(balance_status.minimum_required):,.2f} minimum required to trade.",
+                rule_id=_RULE_IDS["insufficient_balance"],
+                limit=str(balance_status.minimum_required),
+                actual_value=str(hl_balance),
+                balance=hl_balance,
+                minimum_required=balance_status.minimum_required,
+            )
 
         # Current HL exposure = hl_balance * total_leverage (NL from validator)
         positions_section = dashboard.get("positions", {})
@@ -434,21 +439,22 @@ class RulesClient:
         )
         current_hl_exposure = hl_balance * total_leverage
 
-        pair_max_leverage = _decimal(pair_entry.get("max_leverage"))
-        category = str(pair_entry.get("trade_pair_category", "")).lower()
-        account_max_leverage = _PORTFOLIO_LEVERAGE_CAP.get(category)
-        if account_max_leverage is None:
-            raise HyperscaledError(f"Unknown trade-pair category {category!r} from validator.")
+        # Fetch absolute USD limits from the validator — these are already
+        # account-type-aware (challenge vs funded), so no divisor needed.
+        limits = await self._fetch_limits(wallet)
+        max_position_notional = _decimal(limits.get("max_position_per_pair_usd"))
+        max_portfolio_notional = _decimal(limits.get("max_portfolio_usd"))
 
-        if in_challenge:
-            pair_max_leverage /= _CHALLENGE_LEVERAGE_DIVISOR
-            account_max_leverage /= _CHALLENGE_LEVERAGE_DIVISOR
+        # Per-pair leverage is still used for error messages and flip detection.
+        pair_max_leverage = (
+            max_position_notional / hl_balance if hl_balance > 0 else Decimal("1")
+        )
+        account_max_leverage = (
+            max_portfolio_notional / hl_balance if hl_balance > 0 else Decimal("1")
+        )
 
         validation_price = price if price is not None else await self._fetch_hl_mid_price(pair_entry)
         requested_notional = abs(size) * validation_price
-        requested_leverage = requested_notional / hl_balance
-        max_position_notional = hl_balance * pair_max_leverage
-        max_portfolio_notional = hl_balance * account_max_leverage
 
         # Fetch the existing HL position for this pair to detect reducing trades.
         # A trade in the opposite direction of an existing position reduces exposure
@@ -516,15 +522,32 @@ class RulesClient:
         else:
             projected_exposure = current_hl_exposure + requested_notional
 
-            if requested_notional > max_position_notional or requested_leverage > pair_max_leverage:
+            # Cumulative pair position = existing (same direction) + new order.
+            # Both must be checked against the per-pair limit, not just the new order.
+            projected_pair_notional = existing_pair_notional + requested_notional
+            projected_pair_leverage = (
+                projected_pair_notional / hl_balance if hl_balance > 0 else Decimal("0")
+            )
+
+            if (
+                projected_pair_notional > max_position_notional
+                or projected_pair_leverage > pair_max_leverage
+            ):
+                pair_lim = float(max_position_notional)
+                pair_lev = float(pair_max_leverage)
+                proj_n = float(projected_pair_notional)
+                proj_l = float(projected_pair_leverage)
+                exist_n = float(existing_pair_notional)
+                req_n = float(requested_notional)
                 raise LeverageLimitError(
-                    f"Order size too large. Max position on your HL balance is "
-                    f"${float(max_position_notional):,.2f} ({float(pair_max_leverage):.2f}x leverage). "
-                    f"Requested ${float(requested_notional):,.2f} ({float(requested_leverage):.2f}x).",
+                    f"Order size too large. Max position per pair is "
+                    f"${pair_lim:,.2f} ({pair_lev:.2f}x leverage). "
+                    f"Existing ${exist_n:,.2f} + new ${req_n:,.2f} = "
+                    f"${proj_n:,.2f} ({proj_l:.2f}x).",
                     rule_id=_RULE_IDS["leverage_limit"],
                     limit=str(pair_max_leverage),
-                    actual_value=str(requested_leverage),
-                    requested_leverage=float(requested_leverage),
+                    actual_value=str(projected_pair_leverage),
+                    requested_leverage=float(projected_pair_leverage),
                     max_leverage=float(pair_max_leverage),
                 )
 

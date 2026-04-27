@@ -15,6 +15,8 @@ class LeverageLimits(BaseModel):
 
     account_level: float
     position_level: dict[str, float]
+    max_position_per_pair_usd: float = 0.0
+    max_portfolio_usd: float = 0.0
 
 
 class BalanceStatus(BaseModel):
