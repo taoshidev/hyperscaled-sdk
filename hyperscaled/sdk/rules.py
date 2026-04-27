@@ -422,6 +422,15 @@ class RulesClient:
         hl_balance = balance_status.balance
         if hl_balance <= 0:
             raise HyperscaledError("Hyperliquid balance is zero — deposit funds before trading.")
+        if not balance_status.meets_minimum:
+            raise InsufficientBalanceError(
+                f"HL balance ${float(hl_balance):,.2f} is below the "
+                f"${float(balance_status.minimum_required):,.2f} minimum required to trade.",
+                rule_id=_RULE_IDS["insufficient_balance"],
+                limit=str(balance_status.minimum_required),
+                actual_value=str(hl_balance),
+                balance=hl_balance,
+            )
 
         # Current HL exposure = hl_balance * total_leverage (NL from validator)
         positions_section = dashboard.get("positions", {})

@@ -31,6 +31,20 @@ def _trade_pairs_payload(*pairs: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _limits_payload(
+    account_size: float = 10000.0,
+    max_position_per_pair_usd: float = 5000.0,
+    max_portfolio_usd: float = 10000.0,
+    in_challenge_period: bool = False,
+) -> dict[str, object]:
+    return {
+        "account_size": account_size,
+        "max_position_per_pair_usd": max_position_per_pair_usd,
+        "max_portfolio_usd": max_portfolio_usd,
+        "in_challenge_period": in_challenge_period,
+    }
+
+
 def _dashboard_payload(
     *,
     status: str = "active",
@@ -160,7 +174,7 @@ class TestRulesClient:
 
         rules = await client.rules.list_all_async()
 
-        assert len(rules) == 3
+        assert len(rules) == 2
         assert any(rule.rule_id.endswith("BTCUSD") for rule in rules)
         assert any(rule.limit == "2.5" for rule in rules)
         await client.close()
@@ -177,10 +191,13 @@ class TestRulesClient:
             }
         )
         dashboard = _dashboard_payload()
+        limits = _limits_payload()
 
         def handler(request: httpx.Request) -> httpx.Response:
             if request.url.path == "/trade-pairs":
                 return httpx.Response(200, json=trade_pairs)
+            if request.url.path == f"/hl-traders/{VALID_ADDRESS}/limits":
+                return httpx.Response(200, json=limits)
             if request.url.path == f"/hl-traders/{VALID_ADDRESS}":
                 return httpx.Response(200, json=dashboard)
             if request.url.host == "api.hyperliquid.xyz":
@@ -244,10 +261,14 @@ class TestRulesClient:
             }
         )
         dashboard = _dashboard_payload(balance="10000", capital_used="0")
+        # max_position_per_pair_usd=5000; 1 BTC × $100k = $100k > $5k → LeverageLimitError
+        limits = _limits_payload(max_position_per_pair_usd=5000.0, max_portfolio_usd=10000.0)
 
         def handler(request: httpx.Request) -> httpx.Response:
             if request.url.path == "/trade-pairs":
                 return httpx.Response(200, json=trade_pairs)
+            if request.url.path == f"/hl-traders/{VALID_ADDRESS}/limits":
+                return httpx.Response(200, json=limits)
             if request.url.path == f"/hl-traders/{VALID_ADDRESS}":
                 return httpx.Response(200, json=dashboard)
             if request.url.host == "api.hyperliquid.xyz":
@@ -261,7 +282,7 @@ class TestRulesClient:
 
         client.account.check_balance_async = mock_balance  # type: ignore[assignment]
 
-        with pytest.raises(LeverageLimitError, match="exceeds the validator limit"):
+        with pytest.raises(LeverageLimitError, match="Max position per pair"):
             await client.rules.validate_trade_async(
                 pair="BTC-USDC",
                 side="long",
@@ -281,11 +302,16 @@ class TestRulesClient:
                 "max_leverage": 2.5,
             }
         )
+        # total_leverage=4.9; current_hl_exposure=5000*4.9=$24,500
+        # 0.02 BTC × $100k = $2k; projected=$26,500 > max_portfolio=$5k → ExposureLimitError
         dashboard = _dashboard_payload(balance="10000", capital_used="49000")
+        limits = _limits_payload(max_position_per_pair_usd=5000.0, max_portfolio_usd=5000.0)
 
         def handler(request: httpx.Request) -> httpx.Response:
             if request.url.path == "/trade-pairs":
                 return httpx.Response(200, json=trade_pairs)
+            if request.url.path == f"/hl-traders/{VALID_ADDRESS}/limits":
+                return httpx.Response(200, json=limits)
             if request.url.path == f"/hl-traders/{VALID_ADDRESS}":
                 return httpx.Response(200, json=dashboard)
             if request.url.host == "api.hyperliquid.xyz":
