@@ -26,13 +26,8 @@ T = TypeVar("T")
 _HL_INFO_URL_DEFAULT = "https://api.hyperliquid.xyz/info"
 _BALANCE_POLL_INTERVAL = 5.0
 _HL_DASHBOARD_PATH = "/hl-traders/{hl_address}"
+_HL_LIMITS_PATH = "/hl-traders/{hl_address}/limits"
 _TRADE_PAIRS_PATH = "/trade-pairs"
-_PORTFOLIO_LEVERAGE_CAP: dict[str, float] = {
-    "crypto": 5.0,
-    "forex": 20.0,
-    "indices": 10.0,
-    "equities": 2.0,
-}
 
 
 def _sync_or_async(coro: Coroutine[Any, Any, T]) -> T | Coroutine[Any, Any, T]:
@@ -304,14 +299,11 @@ class AccountClient:
             if isinstance(positions_section, dict) else "0"
         ))
 
-        # Max portfolio leverage — crypto cap, halved in challenge mode
-        _CRYPTO_CAP = Decimal("5")
-        _CHALLENGE_DIVISOR = Decimal("4")
-        base_cap = _CRYPTO_CAP  # default; refined by asset_class if needed
-        asset_class = str(sub_info.get("asset_class", "crypto")).lower()
-        _CAPS = {"crypto": Decimal("5"), "forex": Decimal("20"), "indices": Decimal("10"), "equities": Decimal("2")}
-        base_cap = _CAPS.get(asset_class, _CRYPTO_CAP)
-        max_portfolio_leverage = base_cap / _CHALLENGE_DIVISOR if account_type == "challenge" else base_cap
+        # Max portfolio leverage — derived from validator limits endpoint
+        raw_limits = await self._fetch_limits(hl_address)
+        max_portfolio_usd = Decimal(str(raw_limits.get("max_portfolio_usd", 0) or 0))
+        raw_account_size = Decimal(str(raw_limits.get("account_size", account_size) or account_size or 1))
+        max_portfolio_leverage = max_portfolio_usd / raw_account_size if raw_account_size > 0 else Decimal("1")
 
         # Build per-pair leverage from trade pairs
         leverage_limits = await self.limits_async()
@@ -340,6 +332,21 @@ class AccountClient:
     def info(self) -> AccountInfo | Coroutine[Any, Any, AccountInfo]:
         """Fetch account info (sync or async)."""
         return _sync_or_async(self.info_async())
+
+    async def _fetch_limits(self, hl_address: str) -> dict[str, Any]:
+        """Return trader-specific limits from the validator."""
+        path = _HL_LIMITS_PATH.format(hl_address=hl_address)
+        try:
+            response = await self._client.validator_http.get(path)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise HyperscaledError(
+                f"Failed to fetch trader limits: "
+                f"{exc.response.status_code} {exc.response.reason_phrase}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise HyperscaledError(f"Failed to fetch trader limits: {exc}") from exc
+        return response.json()
 
     async def _fetch_trade_pairs(self) -> list[dict[str, Any]]:
         """Return the validator's currently allowed trade pairs."""
@@ -382,8 +389,12 @@ class AccountClient:
             max_leverage = float(entry.get("max_leverage", 1))
             position_level[display] = max_leverage
 
-        # Account-level cap is the max across all category caps
-        account_level = max(_PORTFOLIO_LEVERAGE_CAP.values()) if _PORTFOLIO_LEVERAGE_CAP else 1.0
+        # Account-level cap from the validator limits endpoint
+        hl_address = self._resolve_wallet_for_validator()
+        raw_limits = await self._fetch_limits(hl_address)
+        max_portfolio_usd = float(raw_limits.get("max_portfolio_usd", 0) or 0)
+        acct_size = float(raw_limits.get("account_size", 1) or 1)
+        account_level = max_portfolio_usd / acct_size if acct_size > 0 else 1.0
 
         return LeverageLimits(
             account_level=account_level,
