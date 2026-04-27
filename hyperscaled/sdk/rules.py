@@ -442,10 +442,25 @@ class RulesClient:
         # Fetch absolute USD limits from the validator — these are already
         # account-type-aware (challenge vs funded), so no divisor needed.
         limits = await self._fetch_limits(wallet)
-        max_position_notional = _decimal(limits.get("max_position_per_pair_usd"))
-        max_portfolio_notional = _decimal(limits.get("max_portfolio_usd"))
+        max_position_notional_funded = _decimal(limits.get("max_position_per_pair_usd"))
+        max_portfolio_notional_funded = _decimal(limits.get("max_portfolio_usd"))
 
-        # Per-pair leverage is still used for error messages and flip detection.
+        # The validator limits are expressed in funded-account USD terms.
+        # All HL notionals (hl_balance, position sizes) are in HL USD terms.
+        # Convert the funded limits to HL terms using the scaling ratio so the
+        # comparisons below are apples-to-apples against HL position sizes.
+        scaling_ratio = _funded_balance / hl_balance if hl_balance > 0 else Decimal("1")
+        max_position_notional = (
+            max_position_notional_funded / scaling_ratio
+            if scaling_ratio > 0
+            else max_position_notional_funded
+        )
+        max_portfolio_notional = (
+            max_portfolio_notional_funded / scaling_ratio
+            if scaling_ratio > 0
+            else max_portfolio_notional_funded
+        )
+
         pair_max_leverage = (
             max_position_notional / hl_balance if hl_balance > 0 else Decimal("1")
         )
