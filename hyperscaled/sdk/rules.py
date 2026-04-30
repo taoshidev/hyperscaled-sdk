@@ -21,6 +21,7 @@ from hyperscaled.exceptions import (
 )
 from hyperscaled.models.rules import Rule, TradeValidation
 from hyperscaled.sdk.client import _run_sync
+from hyperscaled.sdk.pairs import hl_coin_from_entry
 
 if TYPE_CHECKING:
     from hyperscaled.sdk.client import HyperscaledClient
@@ -188,15 +189,8 @@ class RulesClient:
         return response.json()
 
     async def _fetch_hl_mid_price(self, pair: dict[str, Any]) -> Decimal:
-        """Fetch the current Hyperliquid mid price for a crypto pair."""
-        if str(pair.get("trade_pair_category", "")).lower() != "crypto":
-            raise HyperscaledError(
-                "Market-order validation currently only supports Hyperliquid crypto pairs."
-            )
-
-        coin = str(pair.get("trade_pair_id", "")).upper()
-        if coin.endswith("USD"):
-            coin = coin[:-3]
+        """Fetch the current Hyperliquid mid price for a pair."""
+        coin = hl_coin_from_entry(pair)
 
         try:
             hl_info_url = self._client.config.hl_info_url
@@ -474,9 +468,7 @@ class RulesClient:
         # Fetch the existing HL position for this pair to detect reducing trades.
         # A trade in the opposite direction of an existing position reduces exposure
         # rather than adding it — it should not be blocked by leverage limits.
-        coin = str(pair_entry.get("trade_pair_id", "")).upper()
-        if coin.endswith("USD"):
-            coin = coin[:-3]
+        coin = hl_coin_from_entry(pair_entry)
 
         existing_pair_notional = Decimal("0")
         existing_pair_side: str | None = None

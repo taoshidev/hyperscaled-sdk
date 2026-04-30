@@ -22,11 +22,28 @@ from hyperscaled.sdk.client import HyperscaledClient
 VALID_ADDRESS = "0x" + "a1" * 20
 
 
+def _hl_pair(
+    trade_pair_id: str,
+    trade_pair: str,
+    hl_coin: str | None = None,
+    max_leverage: float = 2.5,
+) -> dict[str, object]:
+    base = trade_pair.split("/")[0]
+    return {
+        "trade_pair_id": trade_pair_id,
+        "hl_coin": hl_coin or base,
+        "trade_pair": trade_pair,
+        "trade_pair_category": "crypto",
+        "trade_pair_source": "hyperliquid",
+        "max_leverage": max_leverage,
+    }
+
+
 def _trade_pairs_payload(*pairs: dict[str, object]) -> dict[str, object]:
     return {
-        "allowed_trade_pairs": list(pairs),
+        "allowed": list(pairs),
         "allowed_trade_pair_ids": [str(pair["trade_pair_id"]) for pair in pairs],
-        "total_trade_pairs": len(pairs),
+        "total_allowed": len(pairs),
         "timestamp": 1,
     }
 
@@ -123,18 +140,8 @@ class TestRulesClient:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         payload = _trade_pairs_payload(
-            {
-                "trade_pair_id": "BTCUSD",
-                "trade_pair": "BTC/USD",
-                "trade_pair_category": "crypto",
-                "max_leverage": 2.5,
-            },
-            {
-                "trade_pair_id": "ETHUSD",
-                "trade_pair": "ETH/USD",
-                "trade_pair_category": "crypto",
-                "max_leverage": 2.5,
-            },
+            _hl_pair("BTCUSD", "BTC/USD", "BTC"),
+            _hl_pair("ETHUSD", "ETH/USD", "ETH"),
         )
 
         transport = httpx.MockTransport(
@@ -158,10 +165,7 @@ class TestRulesClient:
     ) -> None:
         payload = _trade_pairs_payload(
             {
-                "trade_pair_id": "BTCUSD",
-                "trade_pair": "BTC/USD",
-                "trade_pair_category": "crypto",
-                "max_leverage": 2.5,
+                **_hl_pair("BTCUSD", "BTC/USD", "BTC"),
             }
         )
 
@@ -184,10 +188,7 @@ class TestRulesClient:
     ) -> None:
         trade_pairs = _trade_pairs_payload(
             {
-                "trade_pair_id": "BTCUSD",
-                "trade_pair": "BTC/USD",
-                "trade_pair_category": "crypto",
-                "max_leverage": 2.5,
+                **_hl_pair("BTCUSD", "BTC/USD", "BTC"),
             }
         )
         dashboard = _dashboard_payload()
@@ -227,10 +228,7 @@ class TestRulesClient:
     ) -> None:
         trade_pairs = _trade_pairs_payload(
             {
-                "trade_pair_id": "ETHUSD",
-                "trade_pair": "ETH/USD",
-                "trade_pair_category": "crypto",
-                "max_leverage": 2.5,
+                **_hl_pair("ETHUSD", "ETH/USD", "ETH"),
             }
         )
         transport = httpx.MockTransport(
@@ -254,10 +252,7 @@ class TestRulesClient:
     ) -> None:
         trade_pairs = _trade_pairs_payload(
             {
-                "trade_pair_id": "BTCUSD",
-                "trade_pair": "BTC/USD",
-                "trade_pair_category": "crypto",
-                "max_leverage": 2.5,
+                **_hl_pair("BTCUSD", "BTC/USD", "BTC"),
             }
         )
         dashboard = _dashboard_payload(balance="10000", capital_used="0")
@@ -296,10 +291,7 @@ class TestRulesClient:
     ) -> None:
         trade_pairs = _trade_pairs_payload(
             {
-                "trade_pair_id": "BTCUSD",
-                "trade_pair": "BTC/USD",
-                "trade_pair_category": "crypto",
-                "max_leverage": 2.5,
+                **_hl_pair("BTCUSD", "BTC/USD", "BTC"),
             }
         )
         # total_leverage=4.9; current_hl_exposure=5000*4.9=$24,500
@@ -339,10 +331,7 @@ class TestRulesClient:
     ) -> None:
         trade_pairs = _trade_pairs_payload(
             {
-                "trade_pair_id": "BTCUSD",
-                "trade_pair": "BTC/USD",
-                "trade_pair_category": "crypto",
-                "max_leverage": 2.5,
+                **_hl_pair("BTCUSD", "BTC/USD", "BTC"),
             }
         )
         dashboard = _dashboard_payload(status="pending")
@@ -371,10 +360,7 @@ class TestRulesClient:
     ) -> None:
         trade_pairs = _trade_pairs_payload(
             {
-                "trade_pair_id": "BTCUSD",
-                "trade_pair": "BTC/USD",
-                "trade_pair_category": "crypto",
-                "max_leverage": 2.5,
+                **_hl_pair("BTCUSD", "BTC/USD", "BTC"),
             }
         )
         dashboard = _dashboard_payload(
@@ -406,10 +392,7 @@ class TestRulesClient:
     ) -> None:
         trade_pairs = _trade_pairs_payload(
             {
-                "trade_pair_id": "BTCUSD",
-                "trade_pair": "BTC/USD",
-                "trade_pair_category": "crypto",
-                "max_leverage": 2.5,
+                **_hl_pair("BTCUSD", "BTC/USD", "BTC"),
             }
         )
         dashboard = _dashboard_payload()

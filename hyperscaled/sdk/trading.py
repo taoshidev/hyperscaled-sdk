@@ -18,7 +18,7 @@ import httpx
 from hyperscaled.exceptions import HyperscaledError, InsufficientBalanceError
 from hyperscaled.models.account import MINIMUM_BALANCE
 from hyperscaled.models.trading import Order
-from hyperscaled.sdk.pairs import normalize_pair_to_hl
+from hyperscaled.sdk.pairs import hl_coin_from_entry, normalize_pair_to_hl
 
 if TYPE_CHECKING:
     from hyperscaled.sdk.client import HyperscaledClient
@@ -51,6 +51,32 @@ class TradingClient:
         self._info: Any = None
         self._trailing_state: dict[str, dict[str, Any]] = {}
         self._sz_decimals_cache: dict[str, int] = {}
+        self._hl_coin_cache: dict[str, str] = {}
+
+    async def _resolve_hl_name(self, pair: str) -> str:
+        """Return the Hyperliquid coin identifier for *pair*.
+
+        Looks up the validator's ``hl_coin`` field (e.g. ``"xyz:CL"`` for WTI
+        oil) so non-standard pairs are routed correctly. Falls back to
+        :func:`normalize_pair_to_hl` for standard crypto pairs.
+        """
+        if pair in self._hl_coin_cache:
+            return self._hl_coin_cache[pair]
+        try:
+            allowed = await self._client.rules._fetch_trade_pairs()
+            for entry in allowed:
+                sdk_pair = f"{hl_coin_from_entry(entry).split(':')[-1]}-USDC"
+                trade_pair = str(entry.get("trade_pair", ""))
+                trade_pair_id = str(entry.get("trade_pair_id", ""))
+                if pair.upper() in {sdk_pair.upper(), trade_pair.upper(), trade_pair_id.upper()}:
+                    coin = hl_coin_from_entry(entry)
+                    self._hl_coin_cache[pair] = coin
+                    return coin
+        except Exception:
+            pass
+        coin = normalize_pair_to_hl(pair)
+        self._hl_coin_cache[pair] = coin
+        return coin
 
     def _get_exchange(self) -> Any:
         """Lazy-initialize the HL Exchange from the configured private key."""
@@ -717,7 +743,7 @@ class TradingClient:
         _ = self._client._resolve_hl_private_key()
 
         # ── Normalize pair ────────────────────────────────────
-        hl_name = normalize_pair_to_hl(pair)
+        hl_name = await self._resolve_hl_name(pair)
 
         # ── USD → coin conversion ─────────────────────────────
         if size_in_usd:
@@ -959,7 +985,7 @@ class TradingClient:
                 "Reconnect with /connect after ensuring you have an active funded account."
             )
 
-        hl_name = normalize_pair_to_hl(pair)
+        hl_name = await self._resolve_hl_name(pair)
 
         # Fetch the current position from Hyperliquid clearinghouse
         hl_info_url = self._client.config.hl_info_url
@@ -1046,7 +1072,7 @@ class TradingClient:
         if trailing_stop is not None:
             self._validate_trailing_stop(trailing_stop)
 
-        hl_name = normalize_pair_to_hl(pair)
+        hl_name = await self._resolve_hl_name(pair)
 
         # Fetch current position to determine side and size
         hl_info_url = self._client.config.hl_info_url
