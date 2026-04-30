@@ -224,8 +224,16 @@ class RulesClient:
         return None
 
     def _pair_list_for_message(self, allowed_pairs: list[dict[str, Any]]) -> list[str]:
-        """Return a stable list of SDK-facing allowed pairs."""
-        return sorted({_sdk_display_pair(entry) for entry in allowed_pairs})
+        """Return a stable list of SDK-facing allowed pairs.
+
+        Excludes pairs whose ``hl_coin`` uses the ``xyz:`` prefix — these are
+        validator-registered future pairs that are not yet live on Hyperliquid.
+        """
+        return sorted(
+            _sdk_display_pair(entry)
+            for entry in allowed_pairs
+            if not str(entry.get("hl_coin", "")).startswith("xyz:")
+        )
 
     def _assert_account_status(self, dashboard: dict[str, Any]) -> None:
         """Raise if the validator says the account is not currently tradeable."""
