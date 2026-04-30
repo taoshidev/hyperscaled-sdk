@@ -370,9 +370,9 @@ class AccountClient:
             raise HyperscaledError(f"Failed to fetch trade pairs: {exc}") from exc
 
         payload = response.json()
-        pairs = payload.get("allowed_trade_pairs")
+        pairs = payload.get("allowed") or payload.get("allowed_trade_pairs")
         if not isinstance(pairs, list):
-            raise HyperscaledError("Trade-pairs response missing allowed_trade_pairs")
+            raise HyperscaledError("Trade-pairs response missing allowed pairs")
         return pairs
 
     async def limits_async(self) -> LeverageLimits:

@@ -218,21 +218,44 @@ class PortfolioClient:
         return payload["dashboard"]
 
     async def _fetch_hl_clearinghouse(self) -> dict[str, Any]:
-        """Fetch the full HL clearinghouse state for the configured wallet."""
+        """Fetch the full HL clearinghouse state for the configured wallet.
+
+        Queries both the default perp dex and the xyz builder-deployed perp dex,
+        merging assetPositions so xyz: pairs appear alongside standard positions.
+        """
         hl_address = self._resolve_wallet()
         hl_info_url = self._client.config.hl_info_url
         try:
-            response = await self._client.http.post(
-                hl_info_url,
-                json={"type": "clearinghouseState", "user": hl_address},
+            default_resp, xyz_resp = await asyncio.gather(
+                self._client.http.post(
+                    hl_info_url,
+                    json={"type": "clearinghouseState", "user": hl_address},
+                ),
+                self._client.http.post(
+                    hl_info_url,
+                    json={"type": "clearinghouseState", "user": hl_address, "dex": "xyz"},
+                ),
             )
-            response.raise_for_status()
+            default_resp.raise_for_status()
         except httpx.HTTPError:
             return {}
 
-        data = response.json()
+        data = default_resp.json()
         if not isinstance(data, dict):
             return {}
+
+        # Merge xyz positions into the default clearinghouse response
+        try:
+            xyz_resp.raise_for_status()
+            xyz_data = xyz_resp.json()
+            if isinstance(xyz_data, dict):
+                xyz_positions = xyz_data.get("assetPositions", [])
+                if isinstance(xyz_positions, list) and xyz_positions:
+                    existing = data.setdefault("assetPositions", [])
+                    existing.extend(xyz_positions)
+        except Exception:
+            pass
+
         return data
 
     async def _fetch_hl_positions(self) -> dict[str, dict[str, Any]]:
@@ -488,11 +511,17 @@ class PortfolioClient:
         hl_info_url = self._client.config.hl_info_url
 
         try:
-            response = await self._client.http.post(
-                hl_info_url,
-                json={"type": "frontendOpenOrders", "user": hl_address},
+            default_resp, xyz_resp = await asyncio.gather(
+                self._client.http.post(
+                    hl_info_url,
+                    json={"type": "frontendOpenOrders", "user": hl_address},
+                ),
+                self._client.http.post(
+                    hl_info_url,
+                    json={"type": "frontendOpenOrders", "user": hl_address, "dex": "xyz"},
+                ),
             )
-            response.raise_for_status()
+            default_resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
             raise HyperscaledError(
                 f"Hyperliquid open-orders request failed: "
@@ -501,9 +530,17 @@ class PortfolioClient:
         except httpx.HTTPError as exc:
             raise HyperscaledError(f"Hyperliquid open-orders request failed: {exc}") from exc
 
-        raw_orders = response.json()
+        raw_orders = default_resp.json()
         if not isinstance(raw_orders, list):
-            return []
+            raw_orders = []
+
+        try:
+            xyz_resp.raise_for_status()
+            xyz_orders = xyz_resp.json()
+            if isinstance(xyz_orders, list):
+                raw_orders = raw_orders + xyz_orders
+        except Exception:
+            pass
 
         result: list[Order] = []
         for raw in raw_orders:

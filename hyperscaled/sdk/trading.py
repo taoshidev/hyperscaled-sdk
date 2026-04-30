@@ -114,6 +114,7 @@ class TradingClient:
                 base_url=base_url,
                 spot_meta={"universe": [], "tokens": []},
                 account_address=account_address,
+                perp_dexs=["", "xyz"],
             )
         return self._exchange
 
@@ -131,7 +132,8 @@ class TradingClient:
             # Pass empty spot_meta to avoid IndexError in hyperliquid-python-sdk
             # spot metadata parsing — we only need perp trading functionality.
             self._info = Info(
-                base_url=base_url, skip_ws=True, spot_meta={"universe": [], "tokens": []}
+                base_url=base_url, skip_ws=True, spot_meta={"universe": [], "tokens": []},
+                perp_dexs=["", "xyz"],
             )
         return self._info
 
@@ -146,8 +148,12 @@ class TradingClient:
             return cached
 
         hl_info_url = self._client.config.hl_info_url
+        is_xyz = hl_name.startswith("xyz:")
+        req: dict[str, Any] = {"type": "meta"}
+        if is_xyz:
+            req["dex"] = "xyz"
         try:
-            response = await self._client.http.post(hl_info_url, json={"type": "meta"})
+            response = await self._client.http.post(hl_info_url, json=req)
             response.raise_for_status()
         except httpx.HTTPError as exc:
             raise HyperscaledError(f"Hyperliquid meta request failed: {exc}") from exc
@@ -171,8 +177,11 @@ class TradingClient:
     async def _fetch_mid_price(self, hl_name: str) -> Decimal:
         """Fetch the current Hyperliquid mid price for a coin."""
         hl_info_url = self._client.config.hl_info_url
+        req: dict[str, Any] = {"type": "allMids"}
+        if hl_name.startswith("xyz:"):
+            req["dex"] = "xyz"
         try:
-            response = await self._client.http.post(hl_info_url, json={"type": "allMids"})
+            response = await self._client.http.post(hl_info_url, json=req)
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             raise HyperscaledError(
@@ -990,11 +999,11 @@ class TradingClient:
         # Fetch the current position from Hyperliquid clearinghouse
         hl_info_url = self._client.config.hl_info_url
         wallet = self._resolve_wallet()
+        pos_req: dict[str, Any] = {"type": "clearinghouseState", "user": wallet}
+        if hl_name.startswith("xyz:"):
+            pos_req["dex"] = "xyz"
         try:
-            response = await self._client.http.post(
-                hl_info_url,
-                json={"type": "clearinghouseState", "user": wallet},
-            )
+            response = await self._client.http.post(hl_info_url, json=pos_req)
             response.raise_for_status()
         except httpx.HTTPError as exc:
             raise HyperscaledError(f"Failed to fetch positions: {exc}") from exc
@@ -1077,11 +1086,11 @@ class TradingClient:
         # Fetch current position to determine side and size
         hl_info_url = self._client.config.hl_info_url
         wallet = self._resolve_wallet()
+        pos_req2: dict[str, Any] = {"type": "clearinghouseState", "user": wallet}
+        if hl_name.startswith("xyz:"):
+            pos_req2["dex"] = "xyz"
         try:
-            response = await self._client.http.post(
-                hl_info_url,
-                json={"type": "clearinghouseState", "user": wallet},
-            )
+            response = await self._client.http.post(hl_info_url, json=pos_req2)
             response.raise_for_status()
         except httpx.HTTPError as exc:
             raise HyperscaledError(f"Failed to fetch positions: {exc}") from exc

@@ -194,7 +194,10 @@ class RulesClient:
 
         try:
             hl_info_url = self._client.config.hl_info_url
-            response = await self._client.http.post(hl_info_url, json={"type": "allMids"})
+            req: dict[str, Any] = {"type": "allMids"}
+            if coin.startswith("xyz:"):
+                req["dex"] = "xyz"
+            response = await self._client.http.post(hl_info_url, json=req)
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             raise HyperscaledError(
@@ -224,16 +227,8 @@ class RulesClient:
         return None
 
     def _pair_list_for_message(self, allowed_pairs: list[dict[str, Any]]) -> list[str]:
-        """Return a stable list of SDK-facing allowed pairs.
-
-        Excludes pairs whose ``hl_coin`` uses the ``xyz:`` prefix — these are
-        validator-registered future pairs that are not yet live on Hyperliquid.
-        """
-        return sorted(
-            _sdk_display_pair(entry)
-            for entry in allowed_pairs
-            if not str(entry.get("hl_coin", "")).startswith("xyz:")
-        )
+        """Return a stable list of SDK-facing allowed pairs."""
+        return sorted({_sdk_display_pair(entry) for entry in allowed_pairs})
 
     def _assert_account_status(self, dashboard: dict[str, Any]) -> None:
         """Raise if the validator says the account is not currently tradeable."""
@@ -482,10 +477,10 @@ class RulesClient:
         existing_pair_side: str | None = None
         try:
             hl_info_url = self._client.config.hl_info_url
-            pos_resp = await self._client.http.post(
-                hl_info_url,
-                json={"type": "clearinghouseState", "user": wallet},
-            )
+            pos_req: dict[str, Any] = {"type": "clearinghouseState", "user": wallet}
+            if coin.startswith("xyz:"):
+                pos_req["dex"] = "xyz"
+            pos_resp = await self._client.http.post(hl_info_url, json=pos_req)
             pos_resp.raise_for_status()
             for ap in pos_resp.json().get("assetPositions", []):
                 p = ap.get("position", {})
