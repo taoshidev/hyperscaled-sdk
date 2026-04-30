@@ -133,10 +133,10 @@ class RulesClient:
             raise HyperscaledError(f"Failed to fetch trade pairs: {exc}") from exc
 
         payload = response.json()
-        pairs = payload.get("allowed_trade_pairs")
+        pairs = payload.get("allowed") or payload.get("allowed_trade_pairs")
         if not isinstance(pairs, list):
-            raise HyperscaledError("Trade-pairs response missing allowed_trade_pairs")
-        return pairs
+            raise HyperscaledError("Trade-pairs response missing allowed pairs")
+        return [p for p in pairs if p.get("trade_pair_source") == "hyperliquid"]
 
     async def _fetch_dashboard(self, hl_address: str) -> dict[str, Any]:
         """Fetch validator dashboard data for the configured HL wallet."""
