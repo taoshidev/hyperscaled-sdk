@@ -61,7 +61,7 @@ class AccountConfig(BaseModel):
 
 class ApiConfig(BaseModel):
     hyperscaled_base_url: str = "https://www.hyperscaled.trade"
-    validator_api_url: str = "http://34.187.154.219:48888"
+    validator_api_url: str = "https://validator.mainnet.vantatrading.io"
     testnet: bool = False
 
 
