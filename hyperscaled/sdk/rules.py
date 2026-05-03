@@ -101,12 +101,14 @@ def _candidate_pair_keys(pair: str) -> set[str]:
 
 def _sdk_display_pair(entry: dict[str, Any]) -> str:
     """Convert a validator trade-pair entry to the SDK-facing display value."""
+    hl_coin = entry.get("hl_coin")
     pair_id = str(entry.get("trade_pair_id", "")).upper()
     pair = str(entry.get("trade_pair", pair_id)).upper()
     category = str(entry.get("trade_pair_category", "")).lower()
 
     if category == "crypto":
-        base = pair_id[:-3] if pair_id.endswith("USD") else pair.split("/")[0]
+        # Use hl_coin when present to preserve case-sensitive names like kPEPE
+        base = hl_coin if hl_coin else (pair_id[:-3] if pair_id.endswith("USD") else pair.split("/")[0])
         return f"{base}-USDC"
 
     if "/" in pair:
