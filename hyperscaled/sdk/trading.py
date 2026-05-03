@@ -18,7 +18,7 @@ import httpx
 from hyperscaled.exceptions import HyperscaledError, InsufficientBalanceError
 from hyperscaled.models.account import MINIMUM_BALANCE
 from hyperscaled.models.trading import Order
-from hyperscaled.sdk.pairs import normalize_pair_to_hl
+from hyperscaled.sdk.pairs import hl_coin_from_entry, normalize_pair_to_hl
 
 if TYPE_CHECKING:
     from hyperscaled.sdk.client import HyperscaledClient
@@ -51,6 +51,32 @@ class TradingClient:
         self._info: Any = None
         self._trailing_state: dict[str, dict[str, Any]] = {}
         self._sz_decimals_cache: dict[str, int] = {}
+        self._hl_coin_cache: dict[str, str] = {}
+
+    async def _resolve_hl_name(self, pair: str) -> str:
+        """Return the Hyperliquid coin identifier for *pair*.
+
+        Looks up the validator's ``hl_coin`` field (e.g. ``"xyz:CL"`` for WTI
+        oil) so non-standard pairs are routed correctly. Falls back to
+        :func:`normalize_pair_to_hl` for standard crypto pairs.
+        """
+        if pair in self._hl_coin_cache:
+            return self._hl_coin_cache[pair]
+        try:
+            allowed = await self._client.rules._fetch_trade_pairs()
+            for entry in allowed:
+                sdk_pair = f"{hl_coin_from_entry(entry).split(':')[-1]}-USDC"
+                trade_pair = str(entry.get("trade_pair", ""))
+                trade_pair_id = str(entry.get("trade_pair_id", ""))
+                if pair.upper() in {sdk_pair.upper(), trade_pair.upper(), trade_pair_id.upper()}:
+                    coin = hl_coin_from_entry(entry)
+                    self._hl_coin_cache[pair] = coin
+                    return coin
+        except Exception:
+            pass
+        coin = normalize_pair_to_hl(pair)
+        self._hl_coin_cache[pair] = coin
+        return coin
 
     def _get_exchange(self) -> Any:
         """Lazy-initialize the HL Exchange from the configured private key."""
@@ -88,6 +114,7 @@ class TradingClient:
                 base_url=base_url,
                 spot_meta={"universe": [], "tokens": []},
                 account_address=account_address,
+                perp_dexs=["", "xyz"],
             )
         return self._exchange
 
@@ -105,7 +132,8 @@ class TradingClient:
             # Pass empty spot_meta to avoid IndexError in hyperliquid-python-sdk
             # spot metadata parsing — we only need perp trading functionality.
             self._info = Info(
-                base_url=base_url, skip_ws=True, spot_meta={"universe": [], "tokens": []}
+                base_url=base_url, skip_ws=True, spot_meta={"universe": [], "tokens": []},
+                perp_dexs=["", "xyz"],
             )
         return self._info
 
@@ -120,8 +148,12 @@ class TradingClient:
             return cached
 
         hl_info_url = self._client.config.hl_info_url
+        is_xyz = hl_name.startswith("xyz:")
+        req: dict[str, Any] = {"type": "meta"}
+        if is_xyz:
+            req["dex"] = "xyz"
         try:
-            response = await self._client.http.post(hl_info_url, json={"type": "meta"})
+            response = await self._client.http.post(hl_info_url, json=req)
             response.raise_for_status()
         except httpx.HTTPError as exc:
             raise HyperscaledError(f"Hyperliquid meta request failed: {exc}") from exc
@@ -145,8 +177,11 @@ class TradingClient:
     async def _fetch_mid_price(self, hl_name: str) -> Decimal:
         """Fetch the current Hyperliquid mid price for a coin."""
         hl_info_url = self._client.config.hl_info_url
+        req: dict[str, Any] = {"type": "allMids"}
+        if hl_name.startswith("xyz:"):
+            req["dex"] = "xyz"
         try:
-            response = await self._client.http.post(hl_info_url, json={"type": "allMids"})
+            response = await self._client.http.post(hl_info_url, json=req)
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             raise HyperscaledError(
@@ -717,7 +752,7 @@ class TradingClient:
         _ = self._client._resolve_hl_private_key()
 
         # ── Normalize pair ────────────────────────────────────
-        hl_name = normalize_pair_to_hl(pair)
+        hl_name = await self._resolve_hl_name(pair)
 
         # ── USD → coin conversion ─────────────────────────────
         if size_in_usd:
@@ -959,16 +994,16 @@ class TradingClient:
                 "Reconnect with /connect after ensuring you have an active funded account."
             )
 
-        hl_name = normalize_pair_to_hl(pair)
+        hl_name = await self._resolve_hl_name(pair)
 
         # Fetch the current position from Hyperliquid clearinghouse
         hl_info_url = self._client.config.hl_info_url
         wallet = self._resolve_wallet()
+        pos_req: dict[str, Any] = {"type": "clearinghouseState", "user": wallet}
+        if hl_name.startswith("xyz:"):
+            pos_req["dex"] = "xyz"
         try:
-            response = await self._client.http.post(
-                hl_info_url,
-                json={"type": "clearinghouseState", "user": wallet},
-            )
+            response = await self._client.http.post(hl_info_url, json=pos_req)
             response.raise_for_status()
         except httpx.HTTPError as exc:
             raise HyperscaledError(f"Failed to fetch positions: {exc}") from exc
@@ -1046,16 +1081,16 @@ class TradingClient:
         if trailing_stop is not None:
             self._validate_trailing_stop(trailing_stop)
 
-        hl_name = normalize_pair_to_hl(pair)
+        hl_name = await self._resolve_hl_name(pair)
 
         # Fetch current position to determine side and size
         hl_info_url = self._client.config.hl_info_url
         wallet = self._resolve_wallet()
+        pos_req2: dict[str, Any] = {"type": "clearinghouseState", "user": wallet}
+        if hl_name.startswith("xyz:"):
+            pos_req2["dex"] = "xyz"
         try:
-            response = await self._client.http.post(
-                hl_info_url,
-                json={"type": "clearinghouseState", "user": wallet},
-            )
+            response = await self._client.http.post(hl_info_url, json=pos_req2)
             response.raise_for_status()
         except httpx.HTTPError as exc:
             raise HyperscaledError(f"Failed to fetch positions: {exc}") from exc

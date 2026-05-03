@@ -21,6 +21,7 @@ from hyperscaled.exceptions import (
 )
 from hyperscaled.models.rules import Rule, TradeValidation
 from hyperscaled.sdk.client import _run_sync
+from hyperscaled.sdk.pairs import hl_coin_from_entry
 
 if TYPE_CHECKING:
     from hyperscaled.sdk.client import HyperscaledClient
@@ -100,12 +101,14 @@ def _candidate_pair_keys(pair: str) -> set[str]:
 
 def _sdk_display_pair(entry: dict[str, Any]) -> str:
     """Convert a validator trade-pair entry to the SDK-facing display value."""
+    hl_coin = entry.get("hl_coin")
     pair_id = str(entry.get("trade_pair_id", "")).upper()
     pair = str(entry.get("trade_pair", pair_id)).upper()
     category = str(entry.get("trade_pair_category", "")).lower()
 
     if category == "crypto":
-        base = pair_id[:-3] if pair_id.endswith("USD") else pair.split("/")[0]
+        # Use hl_coin when present to preserve case-sensitive names like kPEPE
+        base = hl_coin if hl_coin else (pair_id[:-3] if pair_id.endswith("USD") else pair.split("/")[0])
         return f"{base}-USDC"
 
     if "/" in pair:
@@ -133,10 +136,10 @@ class RulesClient:
             raise HyperscaledError(f"Failed to fetch trade pairs: {exc}") from exc
 
         payload = response.json()
-        pairs = payload.get("allowed_trade_pairs")
+        pairs = payload.get("allowed") or payload.get("allowed_trade_pairs")
         if not isinstance(pairs, list):
-            raise HyperscaledError("Trade-pairs response missing allowed_trade_pairs")
-        return pairs
+            raise HyperscaledError("Trade-pairs response missing allowed pairs")
+        return [p for p in pairs if p.get("trade_pair_source") == "hyperliquid"]
 
     async def _fetch_dashboard(self, hl_address: str) -> dict[str, Any]:
         """Fetch validator dashboard data for the configured HL wallet."""
@@ -188,19 +191,15 @@ class RulesClient:
         return response.json()
 
     async def _fetch_hl_mid_price(self, pair: dict[str, Any]) -> Decimal:
-        """Fetch the current Hyperliquid mid price for a crypto pair."""
-        if str(pair.get("trade_pair_category", "")).lower() != "crypto":
-            raise HyperscaledError(
-                "Market-order validation currently only supports Hyperliquid crypto pairs."
-            )
-
-        coin = str(pair.get("trade_pair_id", "")).upper()
-        if coin.endswith("USD"):
-            coin = coin[:-3]
+        """Fetch the current Hyperliquid mid price for a pair."""
+        coin = hl_coin_from_entry(pair)
 
         try:
             hl_info_url = self._client.config.hl_info_url
-            response = await self._client.http.post(hl_info_url, json={"type": "allMids"})
+            req: dict[str, Any] = {"type": "allMids"}
+            if coin.startswith("xyz:"):
+                req["dex"] = "xyz"
+            response = await self._client.http.post(hl_info_url, json=req)
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             raise HyperscaledError(
@@ -474,18 +473,16 @@ class RulesClient:
         # Fetch the existing HL position for this pair to detect reducing trades.
         # A trade in the opposite direction of an existing position reduces exposure
         # rather than adding it — it should not be blocked by leverage limits.
-        coin = str(pair_entry.get("trade_pair_id", "")).upper()
-        if coin.endswith("USD"):
-            coin = coin[:-3]
+        coin = hl_coin_from_entry(pair_entry)
 
         existing_pair_notional = Decimal("0")
         existing_pair_side: str | None = None
         try:
             hl_info_url = self._client.config.hl_info_url
-            pos_resp = await self._client.http.post(
-                hl_info_url,
-                json={"type": "clearinghouseState", "user": wallet},
-            )
+            pos_req: dict[str, Any] = {"type": "clearinghouseState", "user": wallet}
+            if coin.startswith("xyz:"):
+                pos_req["dex"] = "xyz"
+            pos_resp = await self._client.http.post(hl_info_url, json=pos_req)
             pos_resp.raise_for_status()
             for ap in pos_resp.json().get("assetPositions", []):
                 p = ap.get("position", {})

@@ -15,6 +15,8 @@ at ``GET /trade-pairs`` and is exposed via ``HyperscaledClient.rules``
 
 from __future__ import annotations
 
+from typing import Any
+
 
 def _clean(pair: str) -> str:
     raw = pair.strip().upper()
@@ -41,6 +43,19 @@ def normalize_pair_to_hl(pair: str) -> str:
     if raw.endswith("USD") and raw != "USD":
         return raw[:-3]
     return raw
+
+
+def hl_coin_from_entry(entry: dict[str, Any]) -> str:
+    """Return the Hyperliquid coin identifier for a validator trade-pair entry.
+
+    Uses the authoritative ``hl_coin`` field when present (e.g. ``"xyz:CL"``
+    for WTI oil, ``"xyz:NVDA"`` for Nvidia), falling back to deriving the
+    coin name from ``trade_pair`` via :func:`normalize_pair_to_hl`.
+    """
+    hl_coin = entry.get("hl_coin")
+    if hl_coin:
+        return str(hl_coin)
+    return normalize_pair_to_hl(str(entry.get("trade_pair", "")))
 
 
 def normalize_pair_to_vanta(pair: str) -> str:
