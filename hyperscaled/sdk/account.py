@@ -51,6 +51,7 @@ class AccountClient:
 
     def __init__(self, client: HyperscaledClient) -> None:
         self._client = client
+        self._non_default_dex_cache: list[str] | None = None
 
     # ── Wallet validation (SDK-006) ──────────────────────────
 
@@ -77,45 +78,77 @@ class AccountClient:
         """Validate and save the HL wallet (sync or async)."""
         return _sync_or_async(self.setup_async(wallet_address))
 
+    # ── Non-default dex discovery ─────────────────────────────
+
+    async def _get_non_default_dexes(self) -> list[str]:
+        """Derive non-default HIP-3 dex names from trade pair hl_coin prefixes (e.g. 'xyz:AAPL' -> 'xyz')."""
+        if self._non_default_dex_cache is not None:
+            return self._non_default_dex_cache
+        trade_pairs = await self._fetch_trade_pairs()
+        dexes: set[str] = set()
+        for entry in trade_pairs:
+            hl_coin = entry.get("hl_coin", "")
+            if hl_coin and ":" in str(hl_coin):
+                dexes.add(str(hl_coin).split(":")[0])
+        self._non_default_dex_cache = sorted(dexes)
+        return self._non_default_dex_cache
+
     # ── Balance check (SDK-007) ──────────────────────────────
 
     async def _fetch_hl_balance(self, wallet_address: str) -> Decimal:
-        """Return total portfolio value per the Vanta translation spec:
+        """Return total portfolio value matching the tracker's calculation:
 
-            portfolio_value = perp.marginSummary.accountValue
-                            + (spot.USDC.total - spot.USDC.hold)
+            portfolio_value = sum(accountValue across native + non-default dexes)
+                            + (spot.total - spot.hold)
 
-        perp.marginSummary.accountValue already includes locked margin and
-        unrealized PnL. spot.USDC.hold is the portion of spot USDC locked as
-        perp collateral — subtracting it avoids double-counting with the perp
-        value. Together they represent the full economic value of the account.
+        Queries the native dex and all non-default HIP-3 dexes (e.g. ``xyz``)
+        so that perp positions on those dexes are included in the total.
         """
         hl_info_url = self._client.config.hl_info_url
-        perp_value, spot_free = await asyncio.gather(
+        non_default_dexes = await self._get_non_default_dexes()
+
+        tasks: list[Coroutine[Any, Any, Decimal]] = [
             self._fetch_perps_equity(hl_info_url, wallet_address),
             self._fetch_spot_usdc_free(hl_info_url, wallet_address),
-        )
-        return perp_value + spot_free
+        ]
+        for dex in non_default_dexes:
+            tasks.append(self._fetch_perps_equity(hl_info_url, wallet_address, dex=dex))
 
-    async def _fetch_perps_equity(self, hl_info_url: str, wallet_address: str) -> Decimal:
-        """Return the perps clearinghouse account value."""
-        payload = {"type": "clearinghouseState", "user": wallet_address}
+        results = await asyncio.gather(*tasks)
+        native_perp = results[0]
+        spot_free = results[1]
+        dex_perps = results[2:]
+        return native_perp + sum(dex_perps, Decimal("0")) + spot_free
+
+    async def _fetch_perps_equity(
+        self, hl_info_url: str, wallet_address: str, *, dex: str | None = None,
+    ) -> Decimal:
+        """Return the perps clearinghouse accountValue (cross + isolated) for the given dex."""
+        payload: dict[str, str] = {"type": "clearinghouseState", "user": wallet_address}
+        if dex is not None:
+            payload["dex"] = dex
         try:
             response = await self._client.http.post(hl_info_url, json=payload)
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
+            if dex is not None:
+                return Decimal("0")
             raise HyperscaledError(
                 f"Hyperliquid balance request failed: "
                 f"{exc.response.status_code} {exc.response.reason_phrase}"
             ) from exc
         except httpx.HTTPError as exc:
+            if dex is not None:
+                return Decimal("0")
             raise HyperscaledError(f"Hyperliquid balance request failed: {exc}") from exc
 
         data = response.json()
         try:
             equity = data["marginSummary"]["accountValue"]
-        except (KeyError, TypeError) as exc:
-            raise HyperscaledError("Unexpected Hyperliquid balance response shape") from exc
+        except (KeyError, TypeError):
+            if dex is not None:
+                return Decimal("0")
+            raise HyperscaledError("Unexpected Hyperliquid balance response shape")
         return Decimal(str(equity))
 
     async def _fetch_spot_usdc(self, hl_info_url: str, wallet_address: str) -> Decimal:
