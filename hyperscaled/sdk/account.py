@@ -291,6 +291,9 @@ class AccountClient:
         if not isinstance(account_size_data, dict):
             account_size_data = {}
         total_realized_pnl = Decimal(str(account_size_data.get("total_realized_pnl", "0") or "0"))
+        account_balance = Decimal(str(
+            account_size_data.get("balance", "0") or "0"
+        )) or Decimal(str(account_size))  # fallback to starting size
 
         # Current portfolio leverage from positions
         positions_section = dashboard.get("positions", {})
@@ -329,6 +332,7 @@ class AccountClient:
             eod_drawdown_limit=eod_drawdown_limit,
             total_realized_pnl=total_realized_pnl,
             current_equity_ratio=current_equity_ratio,
+            account_balance=account_balance,
             current_leverage=current_leverage,
             max_portfolio_leverage=max_portfolio_leverage,
             leverage_limits=leverage_limits,
@@ -404,12 +408,16 @@ class AccountClient:
         max_position_per_pair_usd = float(raw_limits.get("max_position_per_pair_usd", 0) or 0)
         acct_size = float(raw_limits.get("account_size", 1) or 1)
         account_level = max_portfolio_usd / acct_size if acct_size > 0 else 1.0
+        pair_limit_ratio = max_position_per_pair_usd / acct_size if acct_size > 0 else 0.0
+        portfolio_limit_ratio = max_portfolio_usd / acct_size if acct_size > 0 else 0.0
 
         return LeverageLimits(
             account_level=account_level,
             position_level=position_level,
             max_position_per_pair_usd=max_position_per_pair_usd,
             max_portfolio_usd=max_portfolio_usd,
+            pair_limit_ratio=pair_limit_ratio,
+            portfolio_limit_ratio=portfolio_limit_ratio,
         )
 
     def limits(self) -> LeverageLimits | Coroutine[Any, Any, LeverageLimits]:
