@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-MINIMUM_BALANCE = Decimal("1000.00")
+MINIMUM_BALANCE = Decimal("0.01")
 
 
 class LeverageLimits(BaseModel):
