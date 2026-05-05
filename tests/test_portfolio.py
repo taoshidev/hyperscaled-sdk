@@ -484,7 +484,7 @@ class TestOpenOrders:
         assert order.size == Decimal("0.01")
         assert order.order_id == "123456"
         assert order.hl_order_id == "123456"
-        assert order.scaling_ratio is None
+        assert order.weight is None
         assert order.fill_price is None
 
     async def test_open_orders_sell_side(
