@@ -41,13 +41,13 @@ def open_orders(
         typer.echo("No open orders.")
         return
 
-    header = f"{'Pair':<12} {'Side':<6} {'Type':<8} {'Limit Price':>14} {'Size':>14} {'Funded Size':>14} {'Created':<20}"
+    header = f"{'Pair':<12} {'Side':<6} {'Type':<8} {'Limit Price':>14} {'Size':>14} {'Created':<20}"
     typer.echo(header)
     typer.echo("─" * len(header))
     for o in orders:
         typer.echo(
             f"{o.pair:<12} {o.side:<6} {o.order_type:<8} {_fmt(o.limit_price):>14} "
-            f"{_fmt(o.size):>14} {_fmt(o.funded_equivalent_size):>14} "
+            f"{_fmt(o.size):>14} "
             f"{o.created_at.strftime('%Y-%m-%d %H:%M'):<20}"
         )
 

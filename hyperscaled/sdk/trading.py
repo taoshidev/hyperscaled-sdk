@@ -788,8 +788,12 @@ class TradingClient:
                 f"network (testnet vs mainnet) are correct."
             )
 
-        # ── Scaling ratio ─────────────────────────────────────
-        scaling_ratio = Decimal(str(funded_account_size)) / hl_balance
+        # ── Weight (order USD value / total HL portfolio value) ─
+        if size_in_usd:
+            weight = size / hl_balance
+        else:
+            mid_price = await self._fetch_mid_price(hl_name)
+            weight = (size * mid_price) / hl_balance if mid_price > 0 else Decimal("0")
 
         is_buy = side == "long"
 
@@ -822,7 +826,7 @@ class TradingClient:
 
         # ── Parse parent response ─────────────────────────────
         order = self._parse_hl_response(
-            result, pair, side, size, order_type, scaling_ratio,
+            result, pair, side, size, order_type, weight,
             take_profit, stop_loss, price,
         )
 
@@ -1038,9 +1042,11 @@ class TradingClient:
                 "The position may already be closed."
             )
 
-        # Compute scaling ratio for display
+        # Compute weight for the closing order
         balance_status = await self._client.account.check_balance_async(wallet)
-        scaling_ratio = Decimal(str(funded_account_size)) / balance_status.balance
+        hl_balance = balance_status.balance
+        pos_value = abs(szi) * Decimal(str(position.get("entryPx", 0) or 0))
+        weight = pos_value / hl_balance if hl_balance > 0 else Decimal("0")
 
         # Closing a long is a short order and vice versa
         close_side = "short" if is_long else "long"
@@ -1051,7 +1057,7 @@ class TradingClient:
             side=close_side,
             size=abs(szi),
             order_type="market",
-            scaling_ratio=scaling_ratio,
+            weight=weight,
             take_profit=None,
             stop_loss=None,
             price=None,
@@ -1384,7 +1390,7 @@ class TradingClient:
         side: str,
         size: Decimal,
         order_type: str,
-        scaling_ratio: Decimal,
+        weight: Decimal,
         take_profit: Decimal | None,
         stop_loss: Decimal | None,
         price: Decimal | None,
@@ -1410,13 +1416,11 @@ class TradingClient:
             actual_filled_size = Decimal(str(fill["totalSz"]))
             fill_price = Decimal(str(fill["avgPx"]))
             status = "partial" if actual_filled_size < size else "filled"
-            funded_equivalent_size = actual_filled_size * scaling_ratio
         elif "resting" in entry:
             oid = str(entry["resting"]["oid"])
             fill_price = None
             actual_filled_size = None
             status = "pending"
-            funded_equivalent_size = size * scaling_ratio
         else:
             raise HyperscaledError(f"Unexpected order status entry: {entry}")
 
@@ -1426,11 +1430,10 @@ class TradingClient:
             side=side,  # type: ignore[arg-type]
             size=size,
             filled_size=actual_filled_size,
-            funded_equivalent_size=funded_equivalent_size,
+            weight=weight,
             order_type=order_type,  # type: ignore[arg-type]
             status=status,  # type: ignore[arg-type]
             fill_price=fill_price,
-            scaling_ratio=scaling_ratio,
             take_profit=take_profit,
             stop_loss=stop_loss,
             created_at=datetime.now(timezone.utc),
