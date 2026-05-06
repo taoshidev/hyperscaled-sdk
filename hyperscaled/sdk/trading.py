@@ -65,11 +65,10 @@ class TradingClient:
         try:
             allowed = await self._client.rules._fetch_trade_pairs()
             for entry in allowed:
-                sdk_pair = f"{hl_coin_from_entry(entry).split(':')[-1]}-USDC"
-                trade_pair = str(entry.get("trade_pair", ""))
-                trade_pair_id = str(entry.get("trade_pair_id", ""))
-                if pair.upper() in {sdk_pair.upper(), trade_pair.upper(), trade_pair_id.upper()}:
-                    coin = hl_coin_from_entry(entry)
+                coin = hl_coin_from_entry(entry)
+                base_asset = coin.split(":")[-1]
+                input_base = normalize_pair_to_hl(pair)
+                if input_base.upper() == base_asset.upper():
                     self._hl_coin_cache[pair] = coin
                     return coin
         except Exception:
@@ -827,7 +826,7 @@ class TradingClient:
         # ── Parse parent response ─────────────────────────────
         order = self._parse_hl_response(
             result, pair, side, size, order_type, weight,
-            take_profit, stop_loss, price,
+            take_profit, stop_loss, price, coin_size=coin_size,
         )
 
         # ── Place TP/SL trigger orders ────────────────────────
@@ -1394,6 +1393,7 @@ class TradingClient:
         take_profit: Decimal | None,
         stop_loss: Decimal | None,
         price: Decimal | None,
+        coin_size: Decimal | None = None,
     ) -> Order:
         """Translate a Hyperliquid order response into an ``Order`` model."""
         if result.get("status") != "ok":
@@ -1415,7 +1415,8 @@ class TradingClient:
             oid = str(fill["oid"])
             actual_filled_size = Decimal(str(fill["totalSz"]))
             fill_price = Decimal(str(fill["avgPx"]))
-            status = "partial" if actual_filled_size < size else "filled"
+            expected = coin_size if coin_size is not None else size
+            status = "partial" if actual_filled_size < expected else "filled"
         elif "resting" in entry:
             oid = str(entry["resting"]["oid"])
             fill_price = None
