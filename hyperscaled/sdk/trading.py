@@ -708,12 +708,16 @@ class TradingClient:
         size_in_usd: bool = False,
         trailing_stop: dict[str, Any] | None = None,
         leverage: int | None = None,
+        is_cross: bool = True,
     ) -> Order:
         """Submit an order and return translated funded-account execution info.
 
         When *size_in_usd* is ``True``, *size* is interpreted as a USD notional
         value and automatically converted to coin quantity using the current
         Hyperliquid mid price.
+
+        *is_cross* controls the HL margin mode when setting leverage:
+        ``True`` for cross margin, ``False`` for isolated margin.
         """
         # ── Input validation ──────────────────────────────────
         if not pair.strip():
@@ -801,7 +805,7 @@ class TradingClient:
             # If not provided, HL uses whatever the trader already has configured.
             if leverage is not None:
                 lev_result = await asyncio.to_thread(
-                    exchange.update_leverage, leverage, hl_name, True
+                    exchange.update_leverage, leverage, hl_name, is_cross
                 )
                 if isinstance(lev_result, dict) and lev_result.get("status") != "ok":
                     raise HyperscaledError(
@@ -825,6 +829,7 @@ class TradingClient:
         order = self._parse_hl_response(
             result, pair, side, size, order_type, weight,
             take_profit, stop_loss, price, coin_size=coin_size,
+            hl_balance=hl_balance,
         )
 
         # ── Place TP/SL trigger orders ────────────────────────
@@ -901,13 +906,14 @@ class TradingClient:
         size_in_usd: bool = False,
         trailing_stop: dict[str, Any] | None = None,
         leverage: int | None = None,
+        is_cross: bool = True,
     ) -> Order | Coroutine[Any, Any, Order]:
         """Submit an order (sync or async), following the pattern from AccountClient."""
         return _sync_or_async(
             self.submit_async(
                 pair, side, size, order_type, price, take_profit, stop_loss,
                 size_in_usd=size_in_usd, trailing_stop=trailing_stop,
-                leverage=leverage,
+                leverage=leverage, is_cross=is_cross,
             )
         )
 
@@ -1058,6 +1064,7 @@ class TradingClient:
             take_profit=None,
             stop_loss=None,
             price=None,
+            hl_balance=hl_balance,
         )
 
     def close(self, pair: str) -> Order | Coroutine[Any, Any, Order]:
@@ -1392,6 +1399,7 @@ class TradingClient:
         stop_loss: Decimal | None,
         price: Decimal | None,
         coin_size: Decimal | None = None,
+        hl_balance: Decimal | None = None,
     ) -> Order:
         """Translate a Hyperliquid order response into an ``Order`` model."""
         if result.get("status") != "ok":
@@ -1415,6 +1423,8 @@ class TradingClient:
             fill_price = Decimal(str(fill["avgPx"]))
             expected = coin_size if coin_size is not None else size
             status = "partial" if actual_filled_size < expected else "filled"
+            if hl_balance and hl_balance > 0:
+                weight = (actual_filled_size * fill_price) / hl_balance
         elif "resting" in entry:
             oid = str(entry["resting"]["oid"])
             fill_price = None

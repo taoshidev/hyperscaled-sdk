@@ -486,7 +486,7 @@ class RulesClient:
             pos_resp.raise_for_status()
             for ap in pos_resp.json().get("assetPositions", []):
                 p = ap.get("position", {})
-                if p.get("coin", "").upper() == coin:
+                if p.get("coin", "").upper() == coin.upper():
                     szi = Decimal(str(p.get("szi", "0")))
                     if szi != 0:
                         existing_pair_side = "long" if szi > 0 else "short"
