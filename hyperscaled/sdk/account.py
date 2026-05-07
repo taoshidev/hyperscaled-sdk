@@ -109,7 +109,7 @@ class AccountClient:
 
         tasks: list[Coroutine[Any, Any, Decimal]] = [
             self._fetch_perps_equity(hl_info_url, wallet_address),
-            self._fetch_spot_usdc_free(hl_info_url, wallet_address),
+            self._fetch_spot_available(hl_info_url, wallet_address),
         ]
         for dex in non_default_dexes:
             tasks.append(self._fetch_perps_equity(hl_info_url, wallet_address, dex=dex))
@@ -143,13 +143,12 @@ class AccountClient:
             raise HyperscaledError(f"Hyperliquid balance request failed: {exc}") from exc
 
         data = response.json()
-        try:
-            equity = data["marginSummary"]["accountValue"]
-        except (KeyError, TypeError):
+        margin = data.get("marginSummary") or data.get("crossMarginSummary")
+        if not isinstance(margin, dict) or "accountValue" not in margin:
             if dex is not None:
                 return Decimal("0")
             raise HyperscaledError("Unexpected Hyperliquid balance response shape")
-        return Decimal(str(equity))
+        return Decimal(str(margin["accountValue"]))
 
     async def _fetch_spot_usdc(self, hl_info_url: str, wallet_address: str) -> Decimal:
         """Return the raw spot USDC total (including held/locked amount)."""
@@ -187,6 +186,59 @@ class AccountClient:
                 hold = Decimal(str(balance.get("hold", "0")))
                 return max(Decimal("0"), total - hold)
         return Decimal("0")
+
+    async def _fetch_all_mids(self, hl_info_url: str) -> dict[str, Decimal]:
+        """Return mid prices for all coins from the Hyperliquid allMids endpoint."""
+        try:
+            response = await self._client.http.post(hl_info_url, json={"type": "allMids"})
+            response.raise_for_status()
+        except httpx.HTTPError:
+            return {}
+        data = response.json()
+        if not isinstance(data, dict):
+            return {}
+        return {coin: Decimal(str(price)) for coin, price in data.items()}
+
+    async def _fetch_spot_available(self, hl_info_url: str, wallet_address: str) -> Decimal:
+        """Return total free spot value across all tokens (USDC + non-USDC at mid price).
+
+        Matches the tracker's portfolio value calculation: for each spot balance,
+        value = qty * mid_price (USDC is 1:1), then subtract held amounts to avoid
+        double-counting with perp margin.
+        """
+        spot_payload = {"type": "spotClearinghouseState", "user": wallet_address}
+        try:
+            response = await self._client.http.post(hl_info_url, json=spot_payload)
+            response.raise_for_status()
+        except httpx.HTTPError:
+            return Decimal("0")
+
+        data = response.json()
+        balances = [
+            b for b in data.get("balances", [])
+            if Decimal(str(b.get("total", "0"))) != 0 or Decimal(str(b.get("hold", "0"))) != 0
+        ]
+        if not balances:
+            return Decimal("0")
+
+        has_non_usdc = any(b.get("coin") != "USDC" for b in balances)
+        all_mids = await self._fetch_all_mids(hl_info_url) if has_non_usdc else {}
+
+        spot_value = Decimal("0")
+        spot_hold = Decimal("0")
+        for b in balances:
+            coin = b.get("coin", "")
+            total_qty = Decimal(str(b.get("total", "0")))
+            hold_qty = Decimal(str(b.get("hold", "0")))
+            if coin == "USDC":
+                spot_value += total_qty
+                spot_hold += hold_qty
+            else:
+                mid_price = all_mids.get(coin, Decimal("0"))
+                spot_value += total_qty * mid_price
+                spot_hold += hold_qty * mid_price
+
+        return max(Decimal("0"), spot_value - spot_hold)
 
     def _resolve_wallet(self, wallet_address: str | None = None) -> str:
         """Return the wallet to use: explicit override or configured."""
