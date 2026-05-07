@@ -64,13 +64,11 @@ class TradingClient:
             return self._hl_coin_cache[pair]
         try:
             allowed = await self._client.rules._fetch_trade_pairs()
-            for entry in allowed:
+            entry = self._client.rules._find_allowed_pair(pair, allowed)
+            if entry is not None:
                 coin = hl_coin_from_entry(entry)
-                base_asset = coin.split(":")[-1]
-                input_base = normalize_pair_to_hl(pair)
-                if input_base.upper() == base_asset.upper():
-                    self._hl_coin_cache[pair] = coin
-                    return coin
+                self._hl_coin_cache[pair] = coin
+                return coin
         except Exception:
             pass
         coin = normalize_pair_to_hl(pair)
