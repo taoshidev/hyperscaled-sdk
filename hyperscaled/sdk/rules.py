@@ -13,10 +13,8 @@ import httpx
 from hyperscaled.exceptions import (
     AccountSuspendedError,
     DrawdownBreachError,
-    ExposureLimitError,
     HyperscaledError,
     InsufficientBalanceError,
-    LeverageLimitError,
     UnsupportedPairError,
 )
 from hyperscaled.models.rules import Rule, TradeValidation
@@ -414,9 +412,6 @@ class RulesClient:
         if _funded_balance <= 0:
             raise HyperscaledError("Validator dashboard reported a non-positive funded balance.")
 
-        # All leverage and exposure limits are enforced against the actual HL
-        # balance, not the funded account size.  The funded account size is used
-        # only for scaling display — the risk limits apply to real capital on HL.
         hl_balance = balance_status.balance
         if hl_balance <= 0:
             raise HyperscaledError("Hyperliquid balance is zero — deposit funds before trading.")
@@ -429,151 +424,6 @@ class RulesClient:
                 actual_value=str(hl_balance),
                 balance=hl_balance,
                 minimum_required=balance_status.minimum_required,
-            )
-
-        # Current HL exposure = hl_balance * total_leverage (NL from validator)
-        positions_section = dashboard.get("positions", {})
-        total_leverage = _decimal(
-            positions_section.get("total_leverage") if isinstance(positions_section, dict) else None
-        )
-        current_hl_exposure = hl_balance * total_leverage
-
-        # Fetch absolute USD limits from the validator — these are already
-        # account-type-aware (challenge vs funded), so no divisor needed.
-        limits = await self._fetch_limits(wallet)
-        max_position_notional_funded = _decimal(limits.get("max_position_per_pair_usd"))
-        max_portfolio_notional_funded = _decimal(limits.get("max_portfolio_usd"))
-
-        # The validator limits are expressed in funded-account USD terms.
-        # All HL notionals (hl_balance, position sizes) are in HL USD terms.
-        # Convert the funded limits to HL terms using the scaling ratio so the
-        # comparisons below are apples-to-apples against HL position sizes.
-        scaling_ratio = _funded_balance / hl_balance if hl_balance > 0 else Decimal("1")
-        max_position_notional = (
-            max_position_notional_funded / scaling_ratio
-            if scaling_ratio > 0
-            else max_position_notional_funded
-        )
-        max_portfolio_notional = (
-            max_portfolio_notional_funded / scaling_ratio
-            if scaling_ratio > 0
-            else max_portfolio_notional_funded
-        )
-
-        pair_max_leverage = (
-            max_position_notional / hl_balance if hl_balance > 0 else Decimal("1")
-        )
-        account_max_leverage = (
-            max_portfolio_notional / hl_balance if hl_balance > 0 else Decimal("1")
-        )
-
-        validation_price = price if price is not None else await self._fetch_hl_mid_price(pair_entry)
-        requested_notional = abs(size) * validation_price
-
-        # Fetch the existing HL position for this pair to detect reducing trades.
-        # A trade in the opposite direction of an existing position reduces exposure
-        # rather than adding it — it should not be blocked by leverage limits.
-        coin = hl_coin_from_entry(pair_entry)
-
-        existing_pair_notional = Decimal("0")
-        existing_pair_side: str | None = None
-        try:
-            hl_info_url = self._client.config.hl_info_url
-            pos_req: dict[str, Any] = {"type": "clearinghouseState", "user": wallet}
-            if coin.startswith("xyz:"):
-                pos_req["dex"] = "xyz"
-            pos_resp = await self._client.http.post(hl_info_url, json=pos_req)
-            pos_resp.raise_for_status()
-            for ap in pos_resp.json().get("assetPositions", []):
-                p = ap.get("position", {})
-                if p.get("coin", "").upper() == coin.upper():
-                    szi = Decimal(str(p.get("szi", "0")))
-                    if szi != 0:
-                        existing_pair_side = "long" if szi > 0 else "short"
-                        pos_val = p.get("positionValue")
-                        existing_pair_notional = (
-                            abs(Decimal(str(pos_val))) if pos_val is not None
-                            else abs(szi) * validation_price
-                        )
-                    break
-        except Exception:
-            pass  # If HL is unreachable, fall through to conservative check
-
-        is_reducing = (
-            existing_pair_notional > 0
-            and existing_pair_side is not None
-            and existing_pair_side != side.lower()
-        )
-
-        if is_reducing:
-            # Amount of the existing position actually closed by this order
-            closed_notional = min(requested_notional, existing_pair_notional)
-            # Any excess beyond the existing position opens a new position (flip)
-            net_new_notional = max(Decimal("0"), requested_notional - existing_pair_notional)
-
-            # Only validate leverage for any net new position opened (flip scenario)
-            if net_new_notional > 0:
-                net_leverage = net_new_notional / hl_balance
-                if net_new_notional > max_position_notional or net_leverage > pair_max_leverage:
-                    raise LeverageLimitError(
-                        f"Order would flip the position and open a new position larger than allowed. "
-                        f"Max position on your HL balance is "
-                        f"${float(max_position_notional):,.2f} ({float(pair_max_leverage):.2f}x leverage). "
-                        f"Net new position ${float(net_new_notional):,.2f} ({float(net_leverage):.2f}x).",
-                        rule_id=_RULE_IDS["leverage_limit"],
-                        limit=str(pair_max_leverage),
-                        actual_value=str(net_leverage),
-                        requested_leverage=float(net_leverage),
-                        max_leverage=float(pair_max_leverage),
-                    )
-
-            projected_exposure = max(
-                Decimal("0"),
-                current_hl_exposure - closed_notional + net_new_notional,
-            )
-        else:
-            projected_exposure = current_hl_exposure + requested_notional
-
-            # Cumulative pair position = existing (same direction) + new order.
-            # Both must be checked against the per-pair limit, not just the new order.
-            projected_pair_notional = existing_pair_notional + requested_notional
-            projected_pair_leverage = (
-                projected_pair_notional / hl_balance if hl_balance > 0 else Decimal("0")
-            )
-
-            if (
-                projected_pair_notional > max_position_notional
-                or projected_pair_leverage > pair_max_leverage
-            ):
-                pair_lim = float(max_position_notional)
-                pair_lev = float(pair_max_leverage)
-                proj_n = float(projected_pair_notional)
-                proj_l = float(projected_pair_leverage)
-                exist_n = float(existing_pair_notional)
-                req_n = float(requested_notional)
-                raise LeverageLimitError(
-                    f"Order size too large. Max position per pair is "
-                    f"${pair_lim:,.2f} ({pair_lev:.2f}x leverage). "
-                    f"Existing ${exist_n:,.2f} + new ${req_n:,.2f} = "
-                    f"${proj_n:,.2f} ({proj_l:.2f}x).",
-                    rule_id=_RULE_IDS["leverage_limit"],
-                    limit=str(pair_max_leverage),
-                    actual_value=str(projected_pair_leverage),
-                    requested_leverage=float(projected_pair_leverage),
-                    max_leverage=float(pair_max_leverage),
-                )
-
-        if projected_exposure > max_portfolio_notional:
-            raise ExposureLimitError(
-                f"Trade would exceed your portfolio exposure limit of "
-                f"${float(max_portfolio_notional):,.2f} ({float(account_max_leverage):.2f}x on HL balance). "
-                f"Current exposure ${float(current_hl_exposure):,.2f}, "
-                f"this trade adds ${float(requested_notional):,.2f}.",
-                rule_id=_RULE_IDS["exposure_limit"],
-                limit=str(max_portfolio_notional),
-                actual_value=str(projected_exposure),
-                current_exposure=projected_exposure,
-                max_exposure=max_portfolio_notional,
             )
 
         return TradeValidation(valid=True, violations=[])

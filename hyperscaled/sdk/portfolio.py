@@ -498,10 +498,12 @@ class PortfolioClient:
         )
 
     async def open_orders_async(self) -> list[Order]:
-        """Return currently open orders by querying the Hyperliquid API directly.
+        """Return open orders on Hyperliquid (HL API, not HS).
 
-        Uses ``frontend_open_orders`` to get richer trigger order metadata
-        needed to properly identify TP/SL orders.
+        HS does not have its own open/limit orders — it tracks HL fills
+        and mirrors them automatically. This method queries HL
+        ``frontendOpenOrders`` and is used by cancel flows to enumerate
+        orders for a specific pair.
         """
         hl_address = self._resolve_wallet()
         hl_info_url = self._client.config.hl_info_url
@@ -546,7 +548,7 @@ class PortfolioClient:
         return result
 
     def open_orders(self) -> list[Order] | Coroutine[Any, Any, list[Order]]:
-        """Return open orders synchronously or asynchronously."""
+        """Return open HL orders (sync or async)."""
         return _sync_or_async(self.open_orders_async())
 
     # ── Closed position mapping ───────────────────────────────────

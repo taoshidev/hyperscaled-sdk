@@ -22,7 +22,7 @@ def _fmt(value: Decimal | None) -> str:
 def open_orders(
     json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
 ) -> None:
-    """Show open orders."""
+    """Show open orders on Hyperliquid."""
     try:
         client = HyperscaledClient()
         orders = client.portfolio.open_orders()
