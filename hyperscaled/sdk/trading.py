@@ -64,14 +64,11 @@ class TradingClient:
             return self._hl_coin_cache[pair]
         try:
             allowed = await self._client.rules._fetch_trade_pairs()
-            for entry in allowed:
-                sdk_pair = f"{hl_coin_from_entry(entry).split(':')[-1]}-USDC"
-                trade_pair = str(entry.get("trade_pair", ""))
-                trade_pair_id = str(entry.get("trade_pair_id", ""))
-                if pair.upper() in {sdk_pair.upper(), trade_pair.upper(), trade_pair_id.upper()}:
-                    coin = hl_coin_from_entry(entry)
-                    self._hl_coin_cache[pair] = coin
-                    return coin
+            entry = self._client.rules._find_allowed_pair(pair, allowed)
+            if entry is not None:
+                coin = hl_coin_from_entry(entry)
+                self._hl_coin_cache[pair] = coin
+                return coin
         except Exception:
             pass
         coin = normalize_pair_to_hl(pair)
@@ -711,12 +708,16 @@ class TradingClient:
         size_in_usd: bool = False,
         trailing_stop: dict[str, Any] | None = None,
         leverage: int | None = None,
+        is_cross: bool = True,
     ) -> Order:
         """Submit an order and return translated funded-account execution info.
 
         When *size_in_usd* is ``True``, *size* is interpreted as a USD notional
         value and automatically converted to coin quantity using the current
         Hyperliquid mid price.
+
+        *is_cross* controls the HL margin mode when setting leverage:
+        ``True`` for cross margin, ``False`` for isolated margin.
         """
         # ── Input validation ──────────────────────────────────
         if not pair.strip():
@@ -788,8 +789,12 @@ class TradingClient:
                 f"network (testnet vs mainnet) are correct."
             )
 
-        # ── Scaling ratio ─────────────────────────────────────
-        scaling_ratio = Decimal(str(funded_account_size)) / hl_balance
+        # ── Weight (order USD value / total HL portfolio value) ─
+        if size_in_usd:
+            weight = size / hl_balance
+        else:
+            mid_price = await self._fetch_mid_price(hl_name)
+            weight = (size * mid_price) / hl_balance if mid_price > 0 else Decimal("0")
 
         is_buy = side == "long"
 
@@ -800,7 +805,7 @@ class TradingClient:
             # If not provided, HL uses whatever the trader already has configured.
             if leverage is not None:
                 lev_result = await asyncio.to_thread(
-                    exchange.update_leverage, leverage, hl_name, True
+                    exchange.update_leverage, leverage, hl_name, is_cross
                 )
                 if isinstance(lev_result, dict) and lev_result.get("status") != "ok":
                     raise HyperscaledError(
@@ -822,8 +827,9 @@ class TradingClient:
 
         # ── Parse parent response ─────────────────────────────
         order = self._parse_hl_response(
-            result, pair, side, size, order_type, scaling_ratio,
-            take_profit, stop_loss, price,
+            result, pair, side, size, order_type, weight,
+            take_profit, stop_loss, price, coin_size=coin_size,
+            hl_balance=hl_balance,
         )
 
         # ── Place TP/SL trigger orders ────────────────────────
@@ -900,13 +906,14 @@ class TradingClient:
         size_in_usd: bool = False,
         trailing_stop: dict[str, Any] | None = None,
         leverage: int | None = None,
+        is_cross: bool = True,
     ) -> Order | Coroutine[Any, Any, Order]:
         """Submit an order (sync or async), following the pattern from AccountClient."""
         return _sync_or_async(
             self.submit_async(
                 pair, side, size, order_type, price, take_profit, stop_loss,
                 size_in_usd=size_in_usd, trailing_stop=trailing_stop,
-                leverage=leverage,
+                leverage=leverage, is_cross=is_cross,
             )
         )
 
@@ -1038,9 +1045,11 @@ class TradingClient:
                 "The position may already be closed."
             )
 
-        # Compute scaling ratio for display
+        # Compute weight for the closing order
         balance_status = await self._client.account.check_balance_async(wallet)
-        scaling_ratio = Decimal(str(funded_account_size)) / balance_status.balance
+        hl_balance = balance_status.balance
+        pos_value = abs(szi) * Decimal(str(position.get("entryPx", 0) or 0))
+        weight = pos_value / hl_balance if hl_balance > 0 else Decimal("0")
 
         # Closing a long is a short order and vice versa
         close_side = "short" if is_long else "long"
@@ -1051,10 +1060,11 @@ class TradingClient:
             side=close_side,
             size=abs(szi),
             order_type="market",
-            scaling_ratio=scaling_ratio,
+            weight=weight,
             take_profit=None,
             stop_loss=None,
             price=None,
+            hl_balance=hl_balance,
         )
 
     def close(self, pair: str) -> Order | Coroutine[Any, Any, Order]:
@@ -1384,10 +1394,12 @@ class TradingClient:
         side: str,
         size: Decimal,
         order_type: str,
-        scaling_ratio: Decimal,
+        weight: Decimal,
         take_profit: Decimal | None,
         stop_loss: Decimal | None,
         price: Decimal | None,
+        coin_size: Decimal | None = None,
+        hl_balance: Decimal | None = None,
     ) -> Order:
         """Translate a Hyperliquid order response into an ``Order`` model."""
         if result.get("status") != "ok":
@@ -1409,14 +1421,15 @@ class TradingClient:
             oid = str(fill["oid"])
             actual_filled_size = Decimal(str(fill["totalSz"]))
             fill_price = Decimal(str(fill["avgPx"]))
-            status = "partial" if actual_filled_size < size else "filled"
-            funded_equivalent_size = actual_filled_size * scaling_ratio
+            expected = coin_size if coin_size is not None else size
+            status = "partial" if actual_filled_size < expected else "filled"
+            if hl_balance and hl_balance > 0:
+                weight = (actual_filled_size * fill_price) / hl_balance
         elif "resting" in entry:
             oid = str(entry["resting"]["oid"])
             fill_price = None
             actual_filled_size = None
             status = "pending"
-            funded_equivalent_size = size * scaling_ratio
         else:
             raise HyperscaledError(f"Unexpected order status entry: {entry}")
 
@@ -1426,11 +1439,10 @@ class TradingClient:
             side=side,  # type: ignore[arg-type]
             size=size,
             filled_size=actual_filled_size,
-            funded_equivalent_size=funded_equivalent_size,
+            weight=weight,
             order_type=order_type,  # type: ignore[arg-type]
             status=status,  # type: ignore[arg-type]
             fill_price=fill_price,
-            scaling_ratio=scaling_ratio,
             take_profit=take_profit,
             stop_loss=stop_loss,
             created_at=datetime.now(timezone.utc),

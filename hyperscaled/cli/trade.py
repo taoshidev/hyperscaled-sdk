@@ -27,8 +27,8 @@ def _render_order(order: Order) -> None:
     ]
     if order.fill_price is not None:
         lines.append(f"[bold]Fill Price:[/bold]     ${order.fill_price:,.2f}")
-    lines.append(f"[bold]Scaling Ratio:[/bold] {order.scaling_ratio}")
-    lines.append(f"[bold]Funded Size:[/bold]   ${order.funded_equivalent_size:,.2f}")
+    if order.weight is not None:
+        lines.append(f"[bold]Weight:[/bold]         {float(order.weight) * 100:.2f}%")
     if order.take_profit is not None:
         lines.append(f"[bold]Take Profit:[/bold]   ${order.take_profit:,.2f}")
     if order.stop_loss is not None:

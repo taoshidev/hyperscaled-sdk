@@ -144,15 +144,15 @@ class TestOrder:
             pair="BTC-USDC",
             side="long",
             size=Decimal("200"),
-            funded_equivalent_size=Decimal("20000"),
+            weight=Decimal("0.05"),
             order_type="market",
             status="filled",
             fill_price=Decimal("100250.50"),
-            scaling_ratio=Decimal("100"),
             created_at=_now(),
         )
         assert order.side == "long"
         assert order.fill_price == Decimal("100250.50")
+        assert order.weight == Decimal("0.05")
         assert order.take_profit is None
         assert order.stop_loss is None
 
@@ -168,8 +168,7 @@ class TestOrder:
         )
         assert order.hl_order_id is None
         assert order.size is None
-        assert order.funded_equivalent_size is None
-        assert order.scaling_ratio is None
+        assert order.weight is None
         assert order.limit_price == Decimal("95000")
         assert order.status == "open"
 
@@ -180,10 +179,9 @@ class TestOrder:
                 pair="BTC-USDC",
                 side="up",  # type: ignore[arg-type]
                 size=Decimal("1"),
-                funded_equivalent_size=Decimal("1"),
+                weight=Decimal("0.01"),
                 order_type="market",
                 status="filled",
-                scaling_ratio=Decimal("1"),
                 created_at=_now(),
             )
 
@@ -193,10 +191,9 @@ class TestOrder:
             pair="ETH-USDC",
             side="short",
             size=Decimal("100"),
-            funded_equivalent_size=Decimal("10000"),
+            weight=Decimal("0.5"),
             order_type="limit",
             status="pending",
-            scaling_ratio=Decimal("100"),
             take_profit=Decimal("3000"),
             stop_loss=Decimal("4000"),
             created_at=_now(),

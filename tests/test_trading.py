@@ -99,6 +99,13 @@ def trading_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Hyperscal
         "BTC": 5, "ETH": 4, "SOL": 3, "XRP": 1, "DOGE": 0, "ADA": 1,
     })
 
+    _MOCK_MID = {"BTC": Decimal("100000"), "ETH": Decimal("3500"), "SOL": Decimal("150")}
+
+    async def mock_mid_price(hl_name: str) -> Decimal:
+        return _MOCK_MID.get(hl_name, Decimal("100"))
+
+    client.trade._fetch_mid_price = mock_mid_price  # type: ignore[assignment]
+
     return client
 
 
@@ -231,8 +238,7 @@ class TestSubmitSuccess:
         assert order.order_type == "market"
         assert order.status == "filled"
         assert order.fill_price == Decimal("100250.50")
-        assert order.scaling_ratio == Decimal("100000") / Decimal("1000")
-        assert order.funded_equivalent_size == Decimal("0.01") * order.scaling_ratio
+        assert order.weight == Decimal("0.01") * Decimal("100000") / Decimal("1000")
         mock_exchange.market_open.assert_called_once_with("BTC", True, 0.01)
 
     async def test_submit_market_partial(self, trading_client: HyperscaledClient) -> None:
@@ -245,7 +251,7 @@ class TestSubmitSuccess:
         )
 
         assert order.status == "partial"
-        assert order.funded_equivalent_size == Decimal("0.005") * order.scaling_ratio
+        assert order.weight == Decimal("0.01") * Decimal("100000") / Decimal("1000")
 
     async def test_submit_limit_pending(self, trading_client: HyperscaledClient) -> None:
         mock_exchange = MagicMock()
@@ -266,7 +272,7 @@ class TestSubmitSuccess:
         assert order.order_type == "limit"
         assert order.status == "pending"
         assert order.fill_price is None
-        assert order.funded_equivalent_size == Decimal("0.5") * order.scaling_ratio
+        assert order.weight == Decimal("0.5") * Decimal("3500") / Decimal("1000")
         mock_exchange.order.assert_called_once_with(
             "ETH", False, 0.5, 3500.0, {"limit": {"tif": "Gtc"}}
         )
@@ -289,11 +295,11 @@ class TestSubmitSuccess:
         assert order.stop_loss == Decimal("95000")
 
 
-# ── Scaling ratio computation ─────────────────────────────────
+# ── Weight computation ────────────────────────────────────────
 
 
-class TestScalingRatio:
-    async def test_scaling_ratio_computation(self, trading_client: HyperscaledClient) -> None:
+class TestWeight:
+    async def test_weight_computation(self, trading_client: HyperscaledClient) -> None:
         mock_exchange = MagicMock()
         mock_exchange.market_open.return_value = _hl_filled_response(total_sz="0.02")
         trading_client.trade._exchange = mock_exchange
@@ -302,11 +308,10 @@ class TestScalingRatio:
             pair="BTC-USDC", side="long", size=Decimal("0.02"), order_type="market"
         )
 
-        expected_ratio = Decimal("100000") / Decimal("1000")
-        assert order.scaling_ratio == expected_ratio
-        assert order.funded_equivalent_size == Decimal("0.02") * expected_ratio
+        # weight = (coin_size * mid_price) / hl_balance = (0.02 * 100000) / 1000
+        assert order.weight == Decimal("0.02") * Decimal("100000") / Decimal("1000")
 
-    async def test_scaling_ratio_different_balance(
+    async def test_weight_different_balance(
         self, trading_client: HyperscaledClient
     ) -> None:
         async def balance_5000(*_args: object, **_kwargs: object) -> BalanceStatus:
@@ -322,9 +327,8 @@ class TestScalingRatio:
             pair="SOL-USDC", side="short", size=Decimal("0.1"), order_type="market"
         )
 
-        expected_ratio = Decimal("100000") / Decimal("5000")
-        assert order.scaling_ratio == expected_ratio
-        assert order.funded_equivalent_size == Decimal("0.1") * expected_ratio
+        # weight = (0.1 * 150) / 5000
+        assert order.weight == Decimal("0.1") * Decimal("150") / Decimal("5000")
 
 
 # ── Error paths ───────────────────────────────────────────────

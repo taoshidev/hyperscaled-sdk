@@ -51,6 +51,7 @@ class AccountClient:
 
     def __init__(self, client: HyperscaledClient) -> None:
         self._client = client
+        self._non_default_dex_cache: list[str] | None = None
 
     # ── Wallet validation (SDK-006) ──────────────────────────
 
@@ -77,46 +78,77 @@ class AccountClient:
         """Validate and save the HL wallet (sync or async)."""
         return _sync_or_async(self.setup_async(wallet_address))
 
+    # ── Non-default dex discovery ─────────────────────────────
+
+    async def _get_non_default_dexes(self) -> list[str]:
+        """Derive non-default HIP-3 dex names from trade pair hl_coin prefixes (e.g. 'xyz:AAPL' -> 'xyz')."""
+        if self._non_default_dex_cache is not None:
+            return self._non_default_dex_cache
+        trade_pairs = await self._fetch_trade_pairs()
+        dexes: set[str] = set()
+        for entry in trade_pairs:
+            hl_coin = entry.get("hl_coin", "")
+            if hl_coin and ":" in str(hl_coin):
+                dexes.add(str(hl_coin).split(":")[0])
+        self._non_default_dex_cache = sorted(dexes)
+        return self._non_default_dex_cache
+
     # ── Balance check (SDK-007) ──────────────────────────────
 
     async def _fetch_hl_balance(self, wallet_address: str) -> Decimal:
-        """Return total portfolio value per the Vanta translation spec:
+        """Return total portfolio value matching the tracker's calculation:
 
-            portfolio_value = perp.marginSummary.accountValue
-                            + (spot.USDC.total - spot.USDC.hold)
+            portfolio_value = sum(accountValue across native + non-default dexes)
+                            + (spot.total - spot.hold)
 
-        perp.marginSummary.accountValue already includes locked margin and
-        unrealized PnL. spot.USDC.hold is the portion of spot USDC locked as
-        perp collateral — subtracting it avoids double-counting with the perp
-        value. Together they represent the full economic value of the account.
+        Queries the native dex and all non-default HIP-3 dexes (e.g. ``xyz``)
+        so that perp positions on those dexes are included in the total.
         """
         hl_info_url = self._client.config.hl_info_url
-        perp_value, spot_free = await asyncio.gather(
-            self._fetch_perps_equity(hl_info_url, wallet_address),
-            self._fetch_spot_usdc_free(hl_info_url, wallet_address),
-        )
-        return perp_value + spot_free
+        non_default_dexes = await self._get_non_default_dexes()
 
-    async def _fetch_perps_equity(self, hl_info_url: str, wallet_address: str) -> Decimal:
-        """Return the perps clearinghouse account value."""
-        payload = {"type": "clearinghouseState", "user": wallet_address}
+        tasks: list[Coroutine[Any, Any, Decimal]] = [
+            self._fetch_perps_equity(hl_info_url, wallet_address),
+            self._fetch_spot_available(hl_info_url, wallet_address),
+        ]
+        for dex in non_default_dexes:
+            tasks.append(self._fetch_perps_equity(hl_info_url, wallet_address, dex=dex))
+
+        results = await asyncio.gather(*tasks)
+        native_perp = results[0]
+        spot_free = results[1]
+        dex_perps = results[2:]
+        return native_perp + sum(dex_perps, Decimal("0")) + spot_free
+
+    async def _fetch_perps_equity(
+        self, hl_info_url: str, wallet_address: str, *, dex: str | None = None,
+    ) -> Decimal:
+        """Return the perps clearinghouse accountValue (cross + isolated) for the given dex."""
+        payload: dict[str, str] = {"type": "clearinghouseState", "user": wallet_address}
+        if dex is not None:
+            payload["dex"] = dex
         try:
             response = await self._client.http.post(hl_info_url, json=payload)
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
+            if dex is not None:
+                return Decimal("0")
             raise HyperscaledError(
                 f"Hyperliquid balance request failed: "
                 f"{exc.response.status_code} {exc.response.reason_phrase}"
             ) from exc
         except httpx.HTTPError as exc:
+            if dex is not None:
+                return Decimal("0")
             raise HyperscaledError(f"Hyperliquid balance request failed: {exc}") from exc
 
         data = response.json()
-        try:
-            equity = data["marginSummary"]["accountValue"]
-        except (KeyError, TypeError) as exc:
-            raise HyperscaledError("Unexpected Hyperliquid balance response shape") from exc
-        return Decimal(str(equity))
+        margin = data.get("marginSummary") or data.get("crossMarginSummary")
+        if not isinstance(margin, dict) or "accountValue" not in margin:
+            if dex is not None:
+                return Decimal("0")
+            raise HyperscaledError("Unexpected Hyperliquid balance response shape")
+        return Decimal(str(margin["accountValue"]))
 
     async def _fetch_spot_usdc(self, hl_info_url: str, wallet_address: str) -> Decimal:
         """Return the raw spot USDC total (including held/locked amount)."""
@@ -154,6 +186,59 @@ class AccountClient:
                 hold = Decimal(str(balance.get("hold", "0")))
                 return max(Decimal("0"), total - hold)
         return Decimal("0")
+
+    async def _fetch_all_mids(self, hl_info_url: str) -> dict[str, Decimal]:
+        """Return mid prices for all coins from the Hyperliquid allMids endpoint."""
+        try:
+            response = await self._client.http.post(hl_info_url, json={"type": "allMids"})
+            response.raise_for_status()
+        except httpx.HTTPError:
+            return {}
+        data = response.json()
+        if not isinstance(data, dict):
+            return {}
+        return {coin: Decimal(str(price)) for coin, price in data.items()}
+
+    async def _fetch_spot_available(self, hl_info_url: str, wallet_address: str) -> Decimal:
+        """Return total free spot value across all tokens (USDC + non-USDC at mid price).
+
+        Matches the tracker's portfolio value calculation: for each spot balance,
+        value = qty * mid_price (USDC is 1:1), then subtract held amounts to avoid
+        double-counting with perp margin.
+        """
+        spot_payload = {"type": "spotClearinghouseState", "user": wallet_address}
+        try:
+            response = await self._client.http.post(hl_info_url, json=spot_payload)
+            response.raise_for_status()
+        except httpx.HTTPError:
+            return Decimal("0")
+
+        data = response.json()
+        balances = [
+            b for b in data.get("balances", [])
+            if Decimal(str(b.get("total", "0"))) != 0 or Decimal(str(b.get("hold", "0"))) != 0
+        ]
+        if not balances:
+            return Decimal("0")
+
+        has_non_usdc = any(b.get("coin") != "USDC" for b in balances)
+        all_mids = await self._fetch_all_mids(hl_info_url) if has_non_usdc else {}
+
+        spot_value = Decimal("0")
+        spot_hold = Decimal("0")
+        for b in balances:
+            coin = b.get("coin", "")
+            total_qty = Decimal(str(b.get("total", "0")))
+            hold_qty = Decimal(str(b.get("hold", "0")))
+            if coin == "USDC":
+                spot_value += total_qty
+                spot_hold += hold_qty
+            else:
+                mid_price = all_mids.get(coin, Decimal("0"))
+                spot_value += total_qty * mid_price
+                spot_hold += hold_qty * mid_price
+
+        return max(Decimal("0"), spot_value - spot_hold)
 
     def _resolve_wallet(self, wallet_address: str | None = None) -> str:
         """Return the wallet to use: explicit override or configured."""
@@ -291,6 +376,9 @@ class AccountClient:
         if not isinstance(account_size_data, dict):
             account_size_data = {}
         total_realized_pnl = Decimal(str(account_size_data.get("total_realized_pnl", "0") or "0"))
+        account_balance = Decimal(str(
+            account_size_data.get("balance", "0") or "0"
+        )) or Decimal(str(account_size))  # fallback to starting size
 
         # Current portfolio leverage from positions
         positions_section = dashboard.get("positions", {})
@@ -329,6 +417,7 @@ class AccountClient:
             eod_drawdown_limit=eod_drawdown_limit,
             total_realized_pnl=total_realized_pnl,
             current_equity_ratio=current_equity_ratio,
+            account_balance=account_balance,
             current_leverage=current_leverage,
             max_portfolio_leverage=max_portfolio_leverage,
             leverage_limits=leverage_limits,
@@ -404,12 +493,16 @@ class AccountClient:
         max_position_per_pair_usd = float(raw_limits.get("max_position_per_pair_usd", 0) or 0)
         acct_size = float(raw_limits.get("account_size", 1) or 1)
         account_level = max_portfolio_usd / acct_size if acct_size > 0 else 1.0
+        pair_limit_ratio = max_position_per_pair_usd / acct_size if acct_size > 0 else 0.0
+        portfolio_limit_ratio = max_portfolio_usd / acct_size if acct_size > 0 else 0.0
 
         return LeverageLimits(
             account_level=account_level,
             position_level=position_level,
             max_position_per_pair_usd=max_position_per_pair_usd,
             max_portfolio_usd=max_portfolio_usd,
+            pair_limit_ratio=pair_limit_ratio,
+            portfolio_limit_ratio=portfolio_limit_ratio,
         )
 
     def limits(self) -> LeverageLimits | Coroutine[Any, Any, LeverageLimits]:

@@ -351,14 +351,12 @@ class PortfolioClient:
             pair=_normalize_trade_pair(raw.get("trade_pair")),
             side=side,
             size=_decimal(quantity) if quantity is not None else None,
-            funded_equivalent_size=_decimal(value) if value is not None else None,
             order_type=execution,
             status="open",
             limit_price=_decimal(raw["limit_price"])
             if raw.get("limit_price") is not None
             else None,
             fill_price=None,
-            scaling_ratio=None,
             take_profit=_decimal(raw["take_profit"])
             if raw.get("take_profit") is not None
             else None,
@@ -490,22 +488,22 @@ class PortfolioClient:
             pair=pair,
             side=side,
             size=_decimal(raw.get("sz")),
-            funded_equivalent_size=None,
             order_type=mapped_order_type,
             status="open",
             limit_price=_decimal(raw.get("limitPx")),
             fill_price=None,
-            scaling_ratio=None,
             take_profit=take_profit,
             stop_loss=stop_loss,
             created_at=_dt_from_ms(raw.get("timestamp", 0)),
         )
 
     async def open_orders_async(self) -> list[Order]:
-        """Return currently open orders by querying the Hyperliquid API directly.
+        """Return open orders on Hyperliquid (HL API, not HS).
 
-        Uses ``frontend_open_orders`` to get richer trigger order metadata
-        needed to properly identify TP/SL orders.
+        HS does not have its own open/limit orders — it tracks HL fills
+        and mirrors them automatically. This method queries HL
+        ``frontendOpenOrders`` and is used by cancel flows to enumerate
+        orders for a specific pair.
         """
         hl_address = self._resolve_wallet()
         hl_info_url = self._client.config.hl_info_url
@@ -550,7 +548,7 @@ class PortfolioClient:
         return result
 
     def open_orders(self) -> list[Order] | Coroutine[Any, Any, list[Order]]:
-        """Return open orders synchronously or asynchronously."""
+        """Return open HL orders (sync or async)."""
         return _sync_or_async(self.open_orders_async())
 
     # ── Closed position mapping ───────────────────────────────────
@@ -659,12 +657,10 @@ class PortfolioClient:
             pair=pair,
             side=side,
             size=_decimal(raw.get("sz")),
-            funded_equivalent_size=None,
             order_type="market",
             status="filled",
             limit_price=None,
             fill_price=_decimal(raw.get("px")),
-            scaling_ratio=None,
             take_profit=None,
             stop_loss=None,
             created_at=_dt_from_ms(raw.get("time", 0)),

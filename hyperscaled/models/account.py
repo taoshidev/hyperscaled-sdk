@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-MINIMUM_BALANCE = Decimal("1000.00")
+MINIMUM_BALANCE = Decimal("0.01")
 
 
 class LeverageLimits(BaseModel):
@@ -17,6 +17,8 @@ class LeverageLimits(BaseModel):
     position_level: dict[str, float]
     max_position_per_pair_usd: float = 0.0
     max_portfolio_usd: float = 0.0
+    pair_limit_ratio: float = 0.0
+    portfolio_limit_ratio: float = 0.0
 
 
 class BalanceStatus(BaseModel):
@@ -45,6 +47,7 @@ class AccountInfo(BaseModel):
     # Payout period performance
     total_realized_pnl: Decimal = Decimal("0")
     current_equity_ratio: Decimal = Decimal("1")  # e.g. 1.05 = +5%
+    account_balance: Decimal = Decimal("0")  # starting size + realized PnL
     # Portfolio leverage
     current_leverage: Decimal = Decimal("0")   # leverage currently in use
     max_portfolio_leverage: Decimal = Decimal("0")  # max allowed given account type
