@@ -102,21 +102,61 @@ def _normalize_compact_position(compact: dict[str, Any], account_size: float) ->
     The new ``get_hl_trader`` response uses compact keys (``tp``, ``t``,
     ``ap``, …).  This converts them to full field names that
     ``_map_position`` / ``_map_closed_position`` expect.
+
+    Position size is computed strictly as size × price:
+      net_quantity = sum of signed `q` (quantity) across the position's
+                     filled orders. Vanta emits `q` on every
+                     ``Order.to_dashboard`` when quantity is set.
+      net_value    = |net_quantity| × current mark price. The mark price
+                     isn't in the compact payload, so net_value is left as
+                     0 here and computed in ``_map_position`` once the HL
+                     clearinghouse mark price is joined in.
+
+    The ``account_size`` argument is kept for back-compat but no longer
+    consumed: the previous ``net_leverage × account_size`` derivation
+    mixed an HS-side ratio with a frozen funded amount and is wrong any
+    time the trader has unrealized P&L.
     """
+    del account_size  # intentionally unused; kept for back-compat signature
     ap = Decimal(str(compact.get("ap", 0) or 0))
-    nl = Decimal(str(compact.get("nl", 0) or 0))
     r = Decimal(str(compact.get("r", 1.0) or 1.0))
     rp = compact.get("rp", 0) or 0
-    acct = Decimal(str(account_size))
+    up = compact.get("up", 0) or 0  # validator-published unrealized PnL (USD)
 
-    net_value = abs(nl * acct) if nl and acct else Decimal(0)
-    net_quantity = abs(net_value / ap) if ap else Decimal(0)
-    entry_value = net_quantity * ap
-    unrealized_pnl = (r - 1) * entry_value if entry_value else Decimal(0)
+    fo = compact.get("fo", {})
+    net_quantity = Decimal(0)
+    if isinstance(fo, dict):
+        for fill in fo.values():
+            if not isinstance(fill, dict):
+                continue
+            q = fill.get("q")
+            if q is not None:
+                net_quantity += Decimal(str(q))
+                continue
+            # Fallback: derive from signed value/price pair when quantity
+            # isn't emitted. Sign comes from order_type (LONG add positive,
+            # SHORT add negative).
+            v = fill.get("v")
+            pr = fill.get("pr")
+            if v is None or pr is None:
+                continue
+            v_dec = Decimal(str(v))
+            pr_dec = Decimal(str(pr))
+            if pr_dec <= 0:
+                continue
+            sign = 1 if str(fill.get("t", "")).upper() == "LONG" else -1
+            net_quantity += sign * (abs(v_dec) / pr_dec)
+
+    # unrealized_pnl: prefer the validator-published `up` (true USD PnL).
+    # Fall back to (r - 1) × entry_value only if `up` is absent.
+    if up:
+        unrealized_pnl = Decimal(str(up))
+    else:
+        entry_value = abs(net_quantity) * ap
+        unrealized_pnl = (r - 1) * entry_value if entry_value else Decimal(0)
 
     # Expand filled orders so _extract_tp_sl can find TP/SL values
     orders: list[dict[str, Any]] = []
-    fo = compact.get("fo", {})
     if isinstance(fo, dict):
         for order_data in fo.values():
             if isinstance(order_data, dict):
@@ -130,14 +170,17 @@ def _normalize_compact_position(compact: dict[str, Any], account_size: float) ->
         "position_type": compact.get("t", "FLAT"),
         "is_closed_position": "c" in compact,
         "net_quantity": net_quantity,
-        "net_value": net_value,
+        # Computed downstream once the HL mark price is joined in.
+        "net_value": Decimal(0),
         "average_entry_price": ap,
         "unrealized_pnl": unrealized_pnl,
         "open_ms": compact.get("o", 0),
         "close_ms": compact.get("c", 0),
         "current_return": r,
         "return_at_close": compact.get("rc", 1.0),
-        "net_leverage": nl,
+        # net_leverage is intentionally set to zero. It is not a position
+        # size and must not be multiplied by anything to derive value.
+        "net_leverage": Decimal(0),
         "realized_pnl": rp,
         "orders": orders,
         "unfilled_orders": [],
@@ -319,11 +362,26 @@ class PortfolioClient:
                 mark_price = coin_data.get("mark_price")
                 liquidation_price = coin_data.get("liquidation_price")
 
+        # Position value: strict size × price.
+        # ``net_quantity`` is the signed coin count (sum of fills' `q` from
+        # the validator) and ``mark_price`` is HL's current mark for the
+        # coin. Their product is the position's true USD value at the
+        # moment of fetch. Never derive from net_leverage × *.
+        net_quantity = _decimal(raw.get("net_quantity"))
+        if mark_price is not None and net_quantity != 0:
+            position_value = abs(net_quantity * mark_price)
+        else:
+            # Mark price unavailable (HL fetch failed or coin not found).
+            # Leave position_value at 0 rather than synthesizing a wrong
+            # value from net_leverage; consumers can detect via 0 + a
+            # populated size that mark_price was missing.
+            position_value = Decimal(0)
+
         return Position(
             symbol=symbol,
             side=side,
-            size=_decimal(raw.get("net_quantity")),
-            position_value=_decimal(raw.get("net_value")),
+            size=abs(net_quantity),
+            position_value=position_value,
             entry_price=_decimal(raw.get("average_entry_price")),
             mark_price=mark_price,
             liquidation_price=liquidation_price,
