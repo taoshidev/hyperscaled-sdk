@@ -240,6 +240,27 @@ def _hl_asset_position(
     }
 
 
+def _hl_dex_aware_transport(default_payload: dict) -> httpx.MockTransport:
+    """HL info-API mock that returns *default_payload* only for the default
+    perp dex; the xyz dex query gets an empty clearinghouseState. This avoids
+    the default+xyz merge in ``_fetch_hl_clearinghouse`` duplicating positions
+    when a single mock payload is supplied.
+    """
+    empty = _hl_clearinghouse_payload(positions=[])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+        try:
+            body = _json.loads(request.content.decode())
+        except Exception:
+            body = {}
+        if body.get("dex") == "xyz":
+            return httpx.Response(200, json=empty)
+        return httpx.Response(200, json=default_payload)
+
+    return httpx.MockTransport(handler)
+
+
 def _transport_404() -> httpx.MockTransport:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(404, json={"error": "No subaccount found"})
@@ -433,6 +454,80 @@ class TestOpenPositions:
 
         assert len(positions) == 1
         assert isinstance(positions[0], Position)
+
+
+# ── Compare (Vanta + Exchange) tests ──────────────────────────
+
+
+class TestCompare:
+    async def test_compare_symbol_on_both_sides(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dashboard = _dashboard_payload(positions=[_position_entry()])
+        hl_ch = _hl_clearinghouse_payload(
+            positions=[_hl_asset_position(coin="BTC")]
+        )
+        client = _make_client(
+            tmp_path, monkeypatch, _transport_for(dashboard),
+            http_handler=_hl_dex_aware_transport(hl_ch),
+        )
+
+        comparison = await client.portfolio.compare_async()
+
+        assert len(comparison.vanta) == 1
+        assert len(comparison.exchange) == 1
+        assert comparison.vanta[0].symbol == "BTC-USDC"
+        assert comparison.exchange[0].symbol == "BTC-USDC"
+
+    async def test_compare_vanta_only(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Validator tracks BTC, HL clearinghouse reports no positions.
+        dashboard = _dashboard_payload(positions=[_position_entry()])
+        hl_ch = _hl_clearinghouse_payload(positions=[])
+        client = _make_client(
+            tmp_path, monkeypatch, _transport_for(dashboard),
+            http_handler=_hl_dex_aware_transport(hl_ch),
+        )
+
+        comparison = await client.portfolio.compare_async()
+
+        assert len(comparison.vanta) == 1
+        assert comparison.exchange == []
+
+    async def test_compare_exchange_only(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # HL holds ETH, validator dashboard has no positions.
+        dashboard = _dashboard_payload(positions=[])
+        hl_ch = _hl_clearinghouse_payload(
+            positions=[_hl_asset_position(coin="ETH", szi="0.5")]
+        )
+        client = _make_client(
+            tmp_path, monkeypatch, _transport_for(dashboard),
+            http_handler=_hl_dex_aware_transport(hl_ch),
+        )
+
+        comparison = await client.portfolio.compare_async()
+
+        assert comparison.vanta == []
+        assert len(comparison.exchange) == 1
+        assert comparison.exchange[0].symbol == "ETH-USDC"
+
+    def test_compare_sync(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dashboard = _dashboard_payload(positions=[_position_entry()])
+        hl_ch = _hl_clearinghouse_payload(positions=[_hl_asset_position(coin="BTC")])
+        client = _make_client(
+            tmp_path, monkeypatch, _transport_for(dashboard),
+            http_handler=_hl_dex_aware_transport(hl_ch),
+        )
+
+        comparison = client.portfolio.compare()  # type: ignore[union-attr]
+
+        assert len(comparison.vanta) == 1
+        assert len(comparison.exchange) == 1
 
 
 # ── Open orders tests ─────────────────────────────────────────
