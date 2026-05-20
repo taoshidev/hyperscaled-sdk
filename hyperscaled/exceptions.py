@@ -2,17 +2,117 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import httpx
 
 
 class HyperscaledError(Exception):
-    """Base exception for all Hyperscaled errors."""
+    """Base exception for all Hyperscaled errors.
 
-    def __init__(self, message: str) -> None:
+    Carries structured context so callers (and the REST wrapping layer) can
+    react programmatically without parsing the message string. Use the
+    :meth:`from_http` and :meth:`from_json_decode` classmethods when wrapping
+    upstream errors — they pick the right subclass and populate fields
+    consistently.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        http_status: int | None = None,
+        operation: str | None = None,
+        body_excerpt: str | None = None,
+        retryable: bool = False,
+    ) -> None:
         self.message = message
+        self.code = code
+        self.http_status = http_status
+        self.operation = operation
+        self.body_excerpt = body_excerpt
+        self.retryable = retryable
         super().__init__(message)
+
+    @classmethod
+    def from_http(
+        cls,
+        exc: httpx.HTTPError,
+        *,
+        operation: str,
+    ) -> HyperscaledError:
+        """Wrap an :mod:`httpx` error with structured context.
+
+        Routes to :class:`HyperscaledServerError` for 5xx/network/timeout
+        (retryable) and :class:`HyperscaledClientError` for 4xx (not retryable).
+        The original exception is preserved as the cause via ``raise … from exc``
+        at the call site.
+        """
+        import httpx as _httpx
+
+        if isinstance(exc, _httpx.TimeoutException):
+            return HyperscaledServerError(
+                f"Timed out while {operation}.",
+                code="HS_NETWORK_TIMEOUT",
+                operation=operation,
+                retryable=True,
+            )
+        if isinstance(exc, _httpx.HTTPStatusError):
+            status = exc.response.status_code
+            body = exc.response.text[:500] if exc.response.text else ""
+            if status >= 500:
+                return HyperscaledServerError(
+                    f"Hyperscaled API returned {status} while {operation}.",
+                    code=f"HS_API_{status}",
+                    http_status=status,
+                    operation=operation,
+                    body_excerpt=body,
+                    retryable=True,
+                )
+            return HyperscaledClientError(
+                f"Hyperscaled API returned {status} while {operation}.",
+                code=f"HS_API_{status}",
+                http_status=status,
+                operation=operation,
+                body_excerpt=body,
+                retryable=False,
+            )
+        return HyperscaledServerError(
+            f"Network error while {operation}: {type(exc).__name__}.",
+            code="HS_NETWORK_ERROR",
+            operation=operation,
+            retryable=True,
+        )
+
+    @classmethod
+    def from_json_decode(
+        cls,
+        exc: json.JSONDecodeError,  # noqa: ARG003 — accepted for API symmetry
+        *,
+        operation: str,
+        body_excerpt: str,
+    ) -> HyperscaledError:
+        """Wrap a JSON decode error with the response body excerpt for debugging."""
+        return HyperscaledServerError(
+            f"Hyperscaled API returned malformed JSON while {operation}.",
+            code="HS_BAD_JSON",
+            operation=operation,
+            body_excerpt=body_excerpt[:500] if body_excerpt else None,
+            retryable=False,
+        )
+
+
+class HyperscaledClientError(HyperscaledError):
+    """4xx-class error — the caller likely needs to fix something."""
+
+
+class HyperscaledServerError(HyperscaledError):
+    """5xx-class, timeout, or network error — likely transient, retry sensible."""
 
 
 class RuleViolationError(HyperscaledError):
