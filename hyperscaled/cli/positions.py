@@ -113,20 +113,18 @@ def compare_positions(
     """
     try:
         client = HyperscaledClient()
-        vanta_positions = client.portfolio.open_positions()
-        exchange_pos = client.portfolio.exchange_positions()
+        comparison = client.portfolio.compare()
     except HyperscaledError as exc:
         if json_output:
             json_error(exc)
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from None
 
+    vanta_positions = comparison.vanta
+    exchange_pos = comparison.exchange
+
     if json_output:
-        data = {
-            "vanta": [p.model_dump(mode="json") for p in vanta_positions],
-            "exchange": [p.model_dump(mode="json") for p in exchange_pos],
-        }
-        typer.echo(json.dumps(data, indent=2, default=str))
+        typer.echo(comparison.model_dump_json(indent=2))
         return
 
     # Index exchange positions by symbol for matching

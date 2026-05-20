@@ -136,8 +136,10 @@ class TestKycStatus:
 
         client.http.get = AsyncMock(return_value=_make_error_response(500))
 
-        with pytest.raises(HyperscaledError, match="Failed to fetch KYC status"):
+        with pytest.raises(HyperscaledError) as excinfo:
             await client.kyc.status_async()
+        assert excinfo.value.code == "HS_API_500"
+        assert excinfo.value.retryable is True
 
         await client.close()
 
@@ -216,8 +218,10 @@ class TestKycStart:
 
         client.http.post = AsyncMock(return_value=_make_error_response(500, "POST"))
 
-        with pytest.raises(HyperscaledError, match="Failed to start KYC"):
+        with pytest.raises(HyperscaledError) as excinfo:
             await client.kyc.start_async()
+        assert excinfo.value.code == "HS_API_500"
+        assert excinfo.value.retryable is True
 
         await client.close()
 

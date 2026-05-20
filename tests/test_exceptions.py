@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from decimal import Decimal
+
+import httpx
+import pytest
 
 from hyperscaled.exceptions import (
     AccountSuspendedError,
     DrawdownBreachError,
     ExposureLimitError,
+    HyperscaledClientError,
     HyperscaledError,
+    HyperscaledServerError,
     InsufficientBalanceError,
     LeverageLimitError,
     OrderFrequencyError,
@@ -188,6 +194,95 @@ class TestOrderFrequencyError:
         )
         assert err.requests_per_minute == 120
         assert err.limit_per_minute == 60
+
+
+class TestStructuredFields:
+    def test_base_carries_structured_fields(self) -> None:
+        err = HyperscaledError(
+            "boom",
+            code="HS_TEST",
+            http_status=418,
+            operation="testing",
+            body_excerpt="hello",
+            retryable=True,
+        )
+        assert err.code == "HS_TEST"
+        assert err.http_status == 418
+        assert err.operation == "testing"
+        assert err.body_excerpt == "hello"
+        assert err.retryable is True
+
+    def test_defaults_are_none_and_not_retryable(self) -> None:
+        err = HyperscaledError("plain")
+        assert err.code is None
+        assert err.http_status is None
+        assert err.operation is None
+        assert err.body_excerpt is None
+        assert err.retryable is False
+
+
+class TestFromHttp:
+    @pytest.mark.parametrize(
+        "status,expected_cls,expected_retryable",
+        [
+            (400, HyperscaledClientError, False),
+            (401, HyperscaledClientError, False),
+            (404, HyperscaledClientError, False),
+            (422, HyperscaledClientError, False),
+            (500, HyperscaledServerError, True),
+            (502, HyperscaledServerError, True),
+            (503, HyperscaledServerError, True),
+        ],
+    )
+    def test_status_routes_to_correct_subclass(
+        self, status: int, expected_cls: type, expected_retryable: bool
+    ) -> None:
+        response = httpx.Response(status, text="server says no")
+        exc = httpx.HTTPStatusError("boom", request=httpx.Request("GET", "/x"), response=response)
+        wrapped = HyperscaledError.from_http(exc, operation="fetching X")
+        assert isinstance(wrapped, expected_cls)
+        assert wrapped.http_status == status
+        assert wrapped.code == f"HS_API_{status}"
+        assert wrapped.operation == "fetching X"
+        assert wrapped.body_excerpt == "server says no"
+        assert wrapped.retryable is expected_retryable
+
+    def test_timeout_is_server_error_retryable(self) -> None:
+        exc = httpx.ReadTimeout("read timeout", request=httpx.Request("GET", "/x"))
+        wrapped = HyperscaledError.from_http(exc, operation="fetching balance")
+        assert isinstance(wrapped, HyperscaledServerError)
+        assert wrapped.code == "HS_NETWORK_TIMEOUT"
+        assert wrapped.retryable is True
+
+    def test_generic_network_error_is_server_error_retryable(self) -> None:
+        exc = httpx.ConnectError("conn refused", request=httpx.Request("GET", "/x"))
+        wrapped = HyperscaledError.from_http(exc, operation="connecting")
+        assert isinstance(wrapped, HyperscaledServerError)
+        assert wrapped.code == "HS_NETWORK_ERROR"
+        assert wrapped.retryable is True
+
+    def test_body_excerpt_preserves_full_body(self) -> None:
+        huge = "x" * 1000
+        response = httpx.Response(500, text=huge)
+        exc = httpx.HTTPStatusError("boom", request=httpx.Request("GET", "/x"), response=response)
+        wrapped = HyperscaledError.from_http(exc, operation="fetching")
+        assert wrapped.body_excerpt == huge
+
+
+class TestFromJsonDecode:
+    def test_wraps_with_excerpt(self) -> None:
+        try:
+            json.loads("{not valid")
+        except json.JSONDecodeError as exc:
+            wrapped = HyperscaledError.from_json_decode(
+                exc, operation="parsing balance", body_excerpt="{not valid"
+            )
+            assert isinstance(wrapped, HyperscaledServerError)
+            assert wrapped.code == "HS_BAD_JSON"
+            assert wrapped.retryable is False
+            assert wrapped.body_excerpt == "{not valid"
+        else:
+            pytest.fail("expected JSONDecodeError")
 
 
 class TestAccountSuspendedError:

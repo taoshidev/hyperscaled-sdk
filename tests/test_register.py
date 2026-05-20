@@ -110,6 +110,87 @@ def _mock_handler(request: httpx.Request) -> httpx.Response:
     return httpx.Response(404, json={"error": "unknown"})
 
 
+class TestRegisterViaSession:
+    """Verifies the huddle recap requirement: registration works when called
+    from the API layer (i.e. through ``HyperscaledClient.session(...)``)
+    without touching the shared local config file.
+    """
+
+    async def test_session_purchase_does_not_write_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_path = tmp_path / "config.toml"
+        monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", config_path)
+
+        transport = httpx.MockTransport(_mock_handler)
+        shared = httpx.AsyncClient(transport=transport, base_url="https://api.example.com")
+
+        client = HyperscaledClient.session(
+            hl_wallet=VALID_ADDRESS,
+            hl_private_key="0xfakekey",
+            base_url="https://api.example.com",
+            testnet=True,  # skip the HL balance precheck — covered by other tests
+            http_client=shared,
+            validator_http_client=shared,
+        )
+        monkeypatch.setattr(
+            client.register,
+            "_sign_payment",
+            lambda reqs, key: {"payment-signature": "test-signature"},
+        )
+
+        result = await client.register.purchase_async(
+            "vanta",
+            25_000,
+            VALID_ADDRESS,
+            email="user@example.com",
+            private_key="0xfakekey",
+        )
+
+        assert isinstance(result, RegistrationStatus)
+        assert result.status == "registered"
+        assert not config_path.exists(), (
+            "session client must not write to the shared config file during registration"
+        )
+        await shared.aclose()
+
+    async def test_session_check_status(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_path = tmp_path / "config.toml"
+        monkeypatch.setattr("hyperscaled.sdk.config._DEFAULT_PATH", config_path)
+
+        def status_handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/registration-status":
+                return httpx.Response(200, json={
+                    "status": "active",
+                    "hl_address": VALID_ADDRESS,
+                    "funded_account_id": "fa-123",
+                    "account_size": 25_000,
+                })
+            return httpx.Response(404, json={"error": "unknown"})
+
+        transport = httpx.MockTransport(status_handler)
+        shared = httpx.AsyncClient(transport=transport, base_url="https://api.example.com")
+        client = HyperscaledClient.session(
+            hl_wallet=VALID_ADDRESS,
+            hl_private_key="0xfakekey",
+            base_url="https://api.example.com",
+            http_client=shared,
+            validator_http_client=shared,
+        )
+
+        status = await client.register.check_status_async(VALID_ADDRESS)
+
+        assert status.status == "active"
+        assert status.funded_account_id == "fa-123"
+        assert status.account_size == 25_000
+        assert not config_path.exists(), (
+            "session client must not persist funded_account_id to shared config"
+        )
+        await shared.aclose()
+
+
 class TestRegisterClient:
     async def test_purchase_rejects_invalid_hl_wallet(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

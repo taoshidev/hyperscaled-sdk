@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar
 import httpx
 
 from hyperscaled.exceptions import HyperscaledError
-from hyperscaled.models.trading import ClosedPosition, Order, Position
+from hyperscaled.models.trading import ClosedPosition, Order, Position, PositionComparison
 from hyperscaled.sdk.client import _run_sync
 
 if TYPE_CHECKING:
@@ -510,6 +510,27 @@ class PortfolioClient:
     def exchange_positions(self) -> list[Position] | Coroutine[Any, Any, list[Position]]:
         """Return Hyperliquid exchange positions synchronously or asynchronously."""
         return _sync_or_async(self.exchange_positions_async())
+
+    # ── Compare (Vanta + Exchange) ────────────────────────────────
+
+    async def compare_async(self) -> PositionComparison:
+        """Return open positions from both the Vanta validator and the
+        Hyperliquid exchange in a single response.
+
+        Equivalent to calling :meth:`open_positions_async` and
+        :meth:`exchange_positions_async` in parallel and packaging the
+        results — intended for REST and other consumers that want both
+        sides in one call.
+        """
+        vanta, exchange = await asyncio.gather(
+            self.open_positions_async(),
+            self.exchange_positions_async(),
+        )
+        return PositionComparison(vanta=vanta, exchange=exchange)
+
+    def compare(self) -> PositionComparison | Coroutine[Any, Any, PositionComparison]:
+        """Return the Vanta + Exchange comparison synchronously or asynchronously."""
+        return _sync_or_async(self.compare_async())
 
     def _map_hl_order(self, raw: dict[str, Any]) -> Order:
         """Map a Hyperliquid open-order dict to an SDK Order.

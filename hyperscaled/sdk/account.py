@@ -130,24 +130,26 @@ class AccountClient:
         try:
             response = await self._client.http.post(hl_info_url, json=payload)
             response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            if dex is not None:
-                return Decimal("0")
-            raise HyperscaledError(
-                f"Hyperliquid balance request failed: "
-                f"{exc.response.status_code} {exc.response.reason_phrase}"
-            ) from exc
         except httpx.HTTPError as exc:
+            # Per-dex paths legitimately 404 on accounts that never used that HIP-3 dex —
+            # keep the zero fallback there. Native-dex errors must surface so a network
+            # outage doesn't read as "wallet is empty".
             if dex is not None:
                 return Decimal("0")
-            raise HyperscaledError(f"Hyperliquid balance request failed: {exc}") from exc
+            raise HyperscaledError.from_http(
+                exc, operation="fetching Hyperliquid perps balance"
+            ) from exc
 
         data = response.json()
         margin = data.get("marginSummary") or data.get("crossMarginSummary")
         if not isinstance(margin, dict) or "accountValue" not in margin:
             if dex is not None:
                 return Decimal("0")
-            raise HyperscaledError("Unexpected Hyperliquid balance response shape")
+            raise HyperscaledError(
+                "Unexpected Hyperliquid balance response shape",
+                code="HS_BAD_SHAPE",
+                operation="fetching Hyperliquid perps balance",
+            )
         return Decimal(str(margin["accountValue"]))
 
     async def _fetch_spot_usdc(self, hl_info_url: str, wallet_address: str) -> Decimal:
@@ -156,8 +158,10 @@ class AccountClient:
         try:
             response = await self._client.http.post(hl_info_url, json=payload)
             response.raise_for_status()
-        except httpx.HTTPError:
-            return Decimal("0")
+        except httpx.HTTPError as exc:
+            raise HyperscaledError.from_http(
+                exc, operation="fetching Hyperliquid spot USDC balance"
+            ) from exc
 
         data = response.json()
         for balance in data.get("balances", []):
@@ -176,8 +180,10 @@ class AccountClient:
         try:
             response = await self._client.http.post(hl_info_url, json=payload)
             response.raise_for_status()
-        except httpx.HTTPError:
-            return Decimal("0")
+        except httpx.HTTPError as exc:
+            raise HyperscaledError.from_http(
+                exc, operation="fetching free Hyperliquid spot USDC"
+            ) from exc
 
         data = response.json()
         for balance in data.get("balances", []):
@@ -192,8 +198,10 @@ class AccountClient:
         try:
             response = await self._client.http.post(hl_info_url, json={"type": "allMids"})
             response.raise_for_status()
-        except httpx.HTTPError:
-            return {}
+        except httpx.HTTPError as exc:
+            raise HyperscaledError.from_http(
+                exc, operation="fetching Hyperliquid mid prices"
+            ) from exc
         data = response.json()
         if not isinstance(data, dict):
             return {}
@@ -210,8 +218,10 @@ class AccountClient:
         try:
             response = await self._client.http.post(hl_info_url, json=spot_payload)
             response.raise_for_status()
-        except httpx.HTTPError:
-            return Decimal("0")
+        except httpx.HTTPError as exc:
+            raise HyperscaledError.from_http(
+                exc, operation="fetching free Hyperliquid spot balance"
+            ) from exc
 
         data = response.json()
         balances = [

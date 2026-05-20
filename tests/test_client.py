@@ -32,7 +32,7 @@ class TestConstruction:
         client = HyperscaledClient()
         assert client.config.wallet.hl_address == ""
         assert client.config.api.hyperscaled_base_url == "https://www.hyperscaled.trade"
-        assert client.config.api.validator_api_url == "http://34.187.154.219:48888"
+        assert client.config.api.validator_api_url == "https://validator.mainnet.vantatrading.io"
 
     def test_constructor_overrides_config(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -59,8 +59,7 @@ class TestConstruction:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         config_path = tmp_path / "config.toml"
-        config = Config()
-        config._path = config_path
+        config = Config.load(path=config_path)
         config.wallet = WalletConfig(hl_address=VALID_ADDRESS)
         config.save()
 

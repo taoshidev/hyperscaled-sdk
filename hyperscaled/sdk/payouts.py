@@ -93,30 +93,46 @@ class PayoutsClient:
         try:
             response = await self._client.validator_http.get(path)
         except httpx.HTTPError as exc:
-            raise HyperscaledError(f"Failed to fetch validator dashboard: {exc}") from exc
+            raise HyperscaledError.from_http(
+                exc, operation="fetching payouts dashboard"
+            ) from exc
 
         if response.status_code == 404:
             raise HyperscaledError(
                 f"No validator dashboard for wallet {hl_address}. "
-                "Ensure this address is registered with the validator."
+                "Ensure this address is registered with the validator.",
+                code="HS_DASHBOARD_NOT_FOUND",
+                http_status=404,
+                operation="fetching payouts dashboard",
             )
 
         try:
             response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise HyperscaledError(
-                "Failed to fetch validator dashboard: "
-                f"{exc.response.status_code} {exc.response.reason_phrase}"
+        except httpx.HTTPError as exc:
+            raise HyperscaledError.from_http(
+                exc, operation="fetching payouts dashboard"
             ) from exc
 
-        payload = response.json()
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise HyperscaledError.from_json_decode(
+                exc,
+                operation="parsing payouts dashboard response",
+                body_excerpt=response.text,
+            ) from exc
         if (
             not isinstance(payload, dict)
             or payload.get("status") != "success"
             or "dashboard" not in payload
         ):
-            raise HyperscaledError("Validator dashboard response has unexpected shape")
-        return payload["dashboard"]
+            raise HyperscaledError(
+                "Validator dashboard response has unexpected shape",
+                code="HS_BAD_SHAPE",
+                operation="fetching payouts dashboard",
+            )
+        dashboard: dict[str, Any] = payload["dashboard"]
+        return dashboard
 
     async def history_async(self) -> list[Payout]:
         """Fetch payout history from the validator dashboard.

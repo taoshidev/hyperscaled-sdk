@@ -108,10 +108,57 @@ class HyperscaledClient:
             self._config.set_value("api.validator_api_url", validator_api_url)
 
         self._hl_private_key = hl_private_key
+        self._disable_env_fallback = False
         self._http: httpx.AsyncClient | None = None
         self._owns_http = True
         self._validator_http: httpx.AsyncClient | None = None
         self._owns_validator_http = True
+
+    @classmethod
+    def session(
+        cls,
+        *,
+        hl_wallet: str,
+        hl_private_key: str,
+        payout_wallet: str | None = None,
+        base_url: str | None = None,
+        validator_api_url: str | None = None,
+        testnet: bool = False,
+        http_client: httpx.AsyncClient | None = None,
+        validator_http_client: httpx.AsyncClient | None = None,
+    ) -> HyperscaledClient:
+        """Construct a client for a single tenant/trader with no file or env state.
+
+        Use this in multi-tenant server contexts (FastAPI, prop firm) where
+        the regular constructor's file-config + env-var fallback would be a
+        cross-tenant leak. All credentials must be supplied explicitly — there
+        is no fallback to ``~/.hyperscaled/config.toml`` or ``HYPERSCALED_*``
+        environment variables.
+
+        Optionally accepts pre-built ``httpx.AsyncClient`` instances so callers
+        can share a connection pool across many sessions. Injected clients are
+        not closed by :meth:`close` (the caller owns their lifecycle).
+        """
+        instance = cls.__new__(cls)
+        config = Config.in_memory()
+        if hl_wallet:
+            config.set_value("wallet.hl_address", hl_wallet)
+        if payout_wallet:
+            config.set_value("wallet.payout_address", payout_wallet)
+        if base_url:
+            config.set_value("api.hyperscaled_base_url", base_url)
+        if validator_api_url:
+            config.set_value("api.validator_api_url", validator_api_url)
+        config.api.testnet = testnet
+
+        instance._config = config
+        instance._hl_private_key = hl_private_key
+        instance._disable_env_fallback = True
+        instance._http = http_client
+        instance._owns_http = http_client is None
+        instance._validator_http = validator_http_client
+        instance._owns_validator_http = validator_http_client is None
+        return instance
 
     @property
     def config(self) -> Config:
@@ -303,8 +350,14 @@ class HyperscaledClient:
         self._kyc = value
 
     def _resolve_hl_private_key(self) -> str:
-        """Return the HL private key from constructor param or environment."""
-        resolved = self._hl_private_key or os.environ.get("HYPERSCALED_HL_PRIVATE_KEY", "")
+        """Return the HL private key from constructor param or environment.
+
+        When the client was built via :meth:`session`, env-var fallback is
+        skipped — credentials must come from the constructor explicitly.
+        """
+        resolved = self._hl_private_key
+        if not resolved and not self._disable_env_fallback:
+            resolved = os.environ.get("HYPERSCALED_HL_PRIVATE_KEY", "")
         if not resolved:
             raise HyperscaledError(
                 "No Hyperliquid private key provided. "
@@ -317,11 +370,14 @@ class HyperscaledClient:
 
         Uses ``wallet.hl_address`` when set; otherwise derives the address from the
         configured private key so trading works with only ``HYPERSCALED_HL_PRIVATE_KEY``.
+        When the client was built via :meth:`session`, env-var fallback is skipped.
         """
         addr = (self._config.wallet.hl_address or "").strip()
         if addr:
             return addr
-        raw_key = self._hl_private_key or os.environ.get("HYPERSCALED_HL_PRIVATE_KEY", "")
+        raw_key = self._hl_private_key
+        if not raw_key and not self._disable_env_fallback:
+            raw_key = os.environ.get("HYPERSCALED_HL_PRIVATE_KEY", "")
         if not raw_key:
             raise HyperscaledError(
                 "No Hyperliquid wallet configured. "

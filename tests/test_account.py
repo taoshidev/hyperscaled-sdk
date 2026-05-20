@@ -244,8 +244,10 @@ class TestCheckBalance:
         mock_response = _make_hl_error_response(500)
         client.http.post = AsyncMock(return_value=mock_response)  # type: ignore[method-assign]
 
-        with pytest.raises(HyperscaledError, match="Hyperliquid balance request failed"):
+        with pytest.raises(HyperscaledError) as excinfo:
             await client.account.check_balance_async()
+        assert excinfo.value.code == "HS_API_500"
+        assert excinfo.value.retryable is True
 
         await client.close()
 
@@ -260,8 +262,10 @@ class TestCheckBalance:
             side_effect=httpx.ConnectError("connection refused")
         )
 
-        with pytest.raises(HyperscaledError, match="Hyperliquid balance request failed"):
+        with pytest.raises(HyperscaledError) as excinfo:
             await client.account.check_balance_async()
+        assert excinfo.value.code == "HS_NETWORK_ERROR"
+        assert excinfo.value.retryable is True
 
         await client.close()
 
