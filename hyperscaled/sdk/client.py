@@ -350,8 +350,14 @@ class HyperscaledClient:
         self._kyc = value
 
     def _resolve_hl_private_key(self) -> str:
-        """Return the HL private key from constructor param or environment."""
-        resolved = self._hl_private_key or os.environ.get("HYPERSCALED_HL_PRIVATE_KEY", "")
+        """Return the HL private key from constructor param or environment.
+
+        When the client was built via :meth:`session`, env-var fallback is
+        skipped — credentials must come from the constructor explicitly.
+        """
+        resolved = self._hl_private_key
+        if not resolved and not self._disable_env_fallback:
+            resolved = os.environ.get("HYPERSCALED_HL_PRIVATE_KEY", "")
         if not resolved:
             raise HyperscaledError(
                 "No Hyperliquid private key provided. "
@@ -364,11 +370,14 @@ class HyperscaledClient:
 
         Uses ``wallet.hl_address`` when set; otherwise derives the address from the
         configured private key so trading works with only ``HYPERSCALED_HL_PRIVATE_KEY``.
+        When the client was built via :meth:`session`, env-var fallback is skipped.
         """
         addr = (self._config.wallet.hl_address or "").strip()
         if addr:
             return addr
-        raw_key = self._hl_private_key or os.environ.get("HYPERSCALED_HL_PRIVATE_KEY", "")
+        raw_key = self._hl_private_key
+        if not raw_key and not self._disable_env_fallback:
+            raw_key = os.environ.get("HYPERSCALED_HL_PRIVATE_KEY", "")
         if not raw_key:
             raise HyperscaledError(
                 "No Hyperliquid wallet configured. "
