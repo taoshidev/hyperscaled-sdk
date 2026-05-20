@@ -52,22 +52,32 @@ class KYCClient:
         try:
             response = await self._client.http.get("/api/kyc/status", params={"wallet": wallet})
         except httpx.HTTPError as exc:
-            raise HyperscaledError(f"Failed to fetch KYC status: {exc}") from exc
+            raise HyperscaledError.from_http(
+                exc, operation="fetching KYC status"
+            ) from exc
 
         if response.status_code in (400, 404):
             raise HyperscaledError(
-                "KYC request failed. Check your wallet address and registration status."
+                "KYC request failed. Check your wallet address and registration status.",
+                code="HS_KYC_NOT_FOUND",
+                http_status=response.status_code,
+                operation="fetching KYC status",
+                body_excerpt=response.text,
             )
 
         try:
             response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise HyperscaledError(
-                f"Failed to fetch KYC status: "
-                f"{exc.response.status_code} {exc.response.reason_phrase}"
+        except httpx.HTTPError as exc:
+            raise HyperscaledError.from_http(
+                exc, operation="fetching KYC status"
             ) from exc
 
-        data = response.json()
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise HyperscaledError.from_json_decode(
+                exc, operation="parsing KYC status response", body_excerpt=response.text
+            ) from exc
         return KycInfo(
             wallet=data["wallet"],
             kyc_status=data["kycStatus"],
@@ -95,21 +105,32 @@ class KYCClient:
         try:
             response = await self._client.http.post("/api/kyc/token", json={"wallet": wallet})
         except httpx.HTTPError as exc:
-            raise HyperscaledError(f"Failed to start KYC: {exc}") from exc
+            raise HyperscaledError.from_http(
+                exc, operation="starting KYC verification"
+            ) from exc
 
         if response.status_code in (400, 404):
             raise HyperscaledError(
-                "KYC request failed. Check your wallet address and registration status."
+                "KYC request failed. Check your wallet address and registration status.",
+                code="HS_KYC_NOT_FOUND",
+                http_status=response.status_code,
+                operation="starting KYC verification",
+                body_excerpt=response.text,
             )
 
         try:
             response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise HyperscaledError(
-                f"Failed to start KYC: {exc.response.status_code} {exc.response.reason_phrase}"
+        except httpx.HTTPError as exc:
+            raise HyperscaledError.from_http(
+                exc, operation="starting KYC verification"
             ) from exc
 
-        data = response.json()
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise HyperscaledError.from_json_decode(
+                exc, operation="parsing KYC token response", body_excerpt=response.text
+            ) from exc
         return KycTokenResponse(
             token=data["token"],
             kyc_status=data["kycStatus"],

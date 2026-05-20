@@ -58,7 +58,10 @@ class TradingClient:
 
         Looks up the validator's ``hl_coin`` field (e.g. ``"xyz:CL"`` for WTI
         oil) so non-standard pairs are routed correctly. Falls back to
-        :func:`normalize_pair_to_hl` for standard crypto pairs.
+        :func:`normalize_pair_to_hl` for standard crypto pairs when the
+        validator lookup fails (network or 4xx/5xx), with a warning so the
+        operator can investigate — silent fallback could route a non-standard
+        pair (e.g. WTI oil) to the wrong asset.
         """
         if pair in self._hl_coin_cache:
             return self._hl_coin_cache[pair]
@@ -69,8 +72,16 @@ class TradingClient:
                 coin = hl_coin_from_entry(entry)
                 self._hl_coin_cache[pair] = coin
                 return coin
-        except Exception:
-            pass
+        except Exception as exc:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "Validator pair lookup failed for %r (%s); "
+                "falling back to generic pair normalization. "
+                "Non-standard pairs (e.g. xyz:CL) may route to the wrong asset.",
+                pair,
+                type(exc).__name__,
+            )
         coin = normalize_pair_to_hl(pair)
         self._hl_coin_cache[pair] = coin
         return coin
@@ -153,7 +164,9 @@ class TradingClient:
             response = await self._client.http.post(hl_info_url, json=req)
             response.raise_for_status()
         except httpx.HTTPError as exc:
-            raise HyperscaledError(f"Hyperliquid meta request failed: {exc}") from exc
+            raise HyperscaledError.from_http(
+                exc, operation="fetching Hyperliquid asset metadata"
+            ) from exc
 
         payload = response.json()
         for asset in payload.get("universe", []):
@@ -161,7 +174,11 @@ class TradingClient:
                 decimals = int(asset.get("szDecimals", 0))
                 self._sz_decimals_cache[hl_name] = decimals
                 return decimals
-        raise HyperscaledError(f"Asset {hl_name} not found in Hyperliquid metadata")
+        raise HyperscaledError(
+            f"Asset {hl_name} not found in Hyperliquid metadata",
+            code="HS_HL_ASSET_NOT_FOUND",
+            operation="fetching Hyperliquid asset metadata",
+        )
 
     @staticmethod
     def _round_size(size: Decimal, sz_decimals: int) -> Decimal:
@@ -180,16 +197,18 @@ class TradingClient:
         try:
             response = await self._client.http.post(hl_info_url, json=req)
             response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise HyperscaledError(
-                f"Hyperliquid mid-price request failed: {exc.response.status_code}"
-            ) from exc
         except httpx.HTTPError as exc:
-            raise HyperscaledError(f"Hyperliquid mid-price request failed: {exc}") from exc
+            raise HyperscaledError.from_http(
+                exc, operation="fetching Hyperliquid mid price"
+            ) from exc
 
         payload = response.json()
         if not isinstance(payload, dict) or hl_name not in payload:
-            raise HyperscaledError(f"Hyperliquid mid price unavailable for {hl_name}")
+            raise HyperscaledError(
+                f"Hyperliquid mid price unavailable for {hl_name}",
+                code="HS_HL_MID_UNAVAILABLE",
+                operation="fetching Hyperliquid mid price",
+            )
         return Decimal(str(payload[hl_name]))
 
     @staticmethod

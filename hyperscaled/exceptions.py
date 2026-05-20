@@ -64,7 +64,7 @@ class HyperscaledError(Exception):
             )
         if isinstance(exc, _httpx.HTTPStatusError):
             status = exc.response.status_code
-            body = exc.response.text[:500] if exc.response.text else ""
+            body = exc.response.text or ""
             if status >= 500:
                 return HyperscaledServerError(
                     f"Hyperscaled API returned {status} while {operation}.",
@@ -102,7 +102,7 @@ class HyperscaledError(Exception):
             f"Hyperscaled API returned malformed JSON while {operation}.",
             code="HS_BAD_JSON",
             operation=operation,
-            body_excerpt=body_excerpt[:500] if body_excerpt else None,
+            body_excerpt=body_excerpt if body_excerpt else None,
             retryable=False,
         )
 

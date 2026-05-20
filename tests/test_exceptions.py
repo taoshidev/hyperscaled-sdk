@@ -261,13 +261,12 @@ class TestFromHttp:
         assert wrapped.code == "HS_NETWORK_ERROR"
         assert wrapped.retryable is True
 
-    def test_body_excerpt_truncated(self) -> None:
+    def test_body_excerpt_preserves_full_body(self) -> None:
         huge = "x" * 1000
         response = httpx.Response(500, text=huge)
         exc = httpx.HTTPStatusError("boom", request=httpx.Request("GET", "/x"), response=response)
         wrapped = HyperscaledError.from_http(exc, operation="fetching")
-        assert wrapped.body_excerpt is not None
-        assert len(wrapped.body_excerpt) == 500
+        assert wrapped.body_excerpt == huge
 
 
 class TestFromJsonDecode:

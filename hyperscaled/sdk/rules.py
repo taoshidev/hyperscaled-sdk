@@ -126,17 +126,24 @@ class RulesClient:
         try:
             response = await self._client.validator_http.get(_TRADE_PAIRS_PATH)
             response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise HyperscaledError(
-                f"Failed to fetch trade pairs: {exc.response.status_code} {exc.response.reason_phrase}"
-            ) from exc
         except httpx.HTTPError as exc:
-            raise HyperscaledError(f"Failed to fetch trade pairs: {exc}") from exc
+            raise HyperscaledError.from_http(
+                exc, operation="fetching trade pairs"
+            ) from exc
 
-        payload = response.json()
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise HyperscaledError.from_json_decode(
+                exc, operation="parsing trade pairs response", body_excerpt=response.text
+            ) from exc
         pairs = payload.get("allowed") or payload.get("allowed_trade_pairs")
         if not isinstance(pairs, list):
-            raise HyperscaledError("Trade-pairs response missing allowed pairs")
+            raise HyperscaledError(
+                "Trade-pairs response missing allowed pairs",
+                code="HS_BAD_SHAPE",
+                operation="fetching trade pairs",
+            )
         return [p for p in pairs if p.get("trade_pair_source") == "hyperliquid"]
 
     async def _fetch_dashboard(self, hl_address: str) -> dict[str, Any]:
@@ -145,7 +152,9 @@ class RulesClient:
         try:
             response = await self._client.validator_http.get(path)
         except httpx.HTTPError as exc:
-            raise HyperscaledError(f"Failed to fetch validator dashboard: {exc}") from exc
+            raise HyperscaledError.from_http(
+                exc, operation="fetching validator dashboard"
+            ) from exc
 
         if response.status_code == 404:
             raise HyperscaledError(
@@ -153,24 +162,37 @@ class RulesClient:
                 "That usually means this address is not registered with the validator yet, "
                 "or HYPERSCALED_VALIDATOR_API_URL points at the wrong host. "
                 "If you use HYPERSCALED_HL_PRIVATE_KEY only, ensure it matches the wallet "
-                "you registered; otherwise set HYPERSCALED_HL_ADDRESS to that registered address."
+                "you registered; otherwise set HYPERSCALED_HL_ADDRESS to that registered address.",
+                code="HS_DASHBOARD_NOT_FOUND",
+                http_status=404,
+                operation="fetching validator dashboard",
             )
 
         try:
             response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise HyperscaledError(
-                "Failed to fetch validator dashboard: "
-                f"{exc.response.status_code} {exc.response.reason_phrase}"
+        except httpx.HTTPError as exc:
+            raise HyperscaledError.from_http(
+                exc, operation="fetching validator dashboard"
             ) from exc
 
-        payload = response.json()
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise HyperscaledError.from_json_decode(
+                exc,
+                operation="parsing validator dashboard response",
+                body_excerpt=response.text,
+            ) from exc
         if (
             not isinstance(payload, dict)
             or payload.get("status") != "success"
             or "dashboard" not in payload
         ):
-            raise HyperscaledError("Validator dashboard response has unexpected shape")
+            raise HyperscaledError(
+                "Validator dashboard response has unexpected shape",
+                code="HS_BAD_SHAPE",
+                operation="fetching validator dashboard",
+            )
         return payload["dashboard"]
 
     async def _fetch_limits(self, hl_address: str) -> dict[str, Any]:
@@ -179,14 +201,17 @@ class RulesClient:
         try:
             response = await self._client.validator_http.get(path)
             response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise HyperscaledError(
-                f"Failed to fetch trader limits: "
-                f"{exc.response.status_code} {exc.response.reason_phrase}"
-            ) from exc
         except httpx.HTTPError as exc:
-            raise HyperscaledError(f"Failed to fetch trader limits: {exc}") from exc
-        return response.json()
+            raise HyperscaledError.from_http(
+                exc, operation="fetching trader limits"
+            ) from exc
+        try:
+            data: dict[str, Any] = response.json()
+        except ValueError as exc:
+            raise HyperscaledError.from_json_decode(
+                exc, operation="parsing trader limits response", body_excerpt=response.text
+            ) from exc
+        return data
 
     async def _fetch_hl_mid_price(self, pair: dict[str, Any]) -> Decimal:
         """Fetch the current Hyperliquid mid price for a pair."""
@@ -199,16 +224,23 @@ class RulesClient:
                 req["dex"] = "xyz"
             response = await self._client.http.post(hl_info_url, json=req)
             response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise HyperscaledError(
-                f"Hyperliquid mid-price request failed: {exc.response.status_code} {exc.response.reason_phrase}"
-            ) from exc
         except httpx.HTTPError as exc:
-            raise HyperscaledError(f"Hyperliquid mid-price request failed: {exc}") from exc
+            raise HyperscaledError.from_http(
+                exc, operation="fetching Hyperliquid mid price"
+            ) from exc
 
-        payload = response.json()
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise HyperscaledError.from_json_decode(
+                exc, operation="parsing Hyperliquid mid price", body_excerpt=response.text
+            ) from exc
         if not isinstance(payload, dict) or coin not in payload:
-            raise HyperscaledError(f"Hyperliquid mid price unavailable for {coin}")
+            raise HyperscaledError(
+                f"Hyperliquid mid price unavailable for {coin}",
+                code="HS_HL_MID_UNAVAILABLE",
+                operation="fetching Hyperliquid mid price",
+            )
         return _decimal(payload[coin])
 
     def _resolve_wallet(self) -> str:

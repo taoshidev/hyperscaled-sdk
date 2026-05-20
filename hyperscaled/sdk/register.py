@@ -274,7 +274,11 @@ class RegisterClient:
         try:
             initial_resp = await self._client.http.post("/api/register", json=body)
         except httpx.HTTPError as exc:
-            raise RegistrationError(f"Registration request failed: {exc}") from exc
+            wrapped = HyperscaledError.from_http(exc, operation="submitting registration")
+            raise RegistrationError(
+                wrapped.message,
+                status_code=wrapped.http_status,
+            ) from exc
 
         if initial_resp.status_code != 402:
             raise RegistrationError(
@@ -294,7 +298,13 @@ class RegisterClient:
                 headers=payment_headers,
             )
         except httpx.HTTPError as exc:
-            raise RegistrationError(f"Paid registration request failed: {exc}") from exc
+            wrapped = HyperscaledError.from_http(
+                exc, operation="completing registration payment"
+            )
+            raise RegistrationError(
+                wrapped.message,
+                status_code=wrapped.http_status,
+            ) from exc
 
         if paid_resp.status_code != 200:
             raise RegistrationError(
@@ -302,7 +312,14 @@ class RegisterClient:
                 status_code=paid_resp.status_code,
             )
 
-        data = paid_resp.json()
+        try:
+            data = paid_resp.json()
+        except ValueError as exc:
+            raise HyperscaledError.from_json_decode(
+                exc,
+                operation="parsing registration response",
+                body_excerpt=paid_resp.text,
+            ) from exc
         self._persist_funded_account_size(account_size)
         return RegistrationStatus(
             status=data.get("status", "pending"),
@@ -355,10 +372,19 @@ class RegisterClient:
                 params={"hl_address": hl_address},
             )
         except httpx.HTTPError as exc:
-            raise RegistrationError(f"Registration status request failed: {exc}") from exc
+            wrapped = HyperscaledError.from_http(
+                exc, operation="checking registration status"
+            )
+            raise RegistrationError(
+                wrapped.message,
+                status_code=wrapped.http_status,
+            ) from exc
 
         if resp.status_code == 400:
-            data = resp.json()
+            try:
+                data = resp.json()
+            except ValueError:
+                data = {}
             raise RegistrationError(
                 data.get("error", "Invalid request"),
                 status_code=400,
@@ -370,7 +396,14 @@ class RegisterClient:
                 status_code=resp.status_code,
             )
 
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise HyperscaledError.from_json_decode(
+                exc,
+                operation="parsing registration status response",
+                body_excerpt=resp.text,
+            ) from exc
         result = RegistrationStatus(
             status=data.get("status", "pending"),
             hl_address=data.get("hl_address", hl_address),

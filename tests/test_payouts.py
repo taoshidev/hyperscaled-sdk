@@ -178,8 +178,10 @@ class TestPayoutsHistory:
 
         client.validator_http.get = AsyncMock(return_value=_make_500_response())
 
-        with pytest.raises(HyperscaledError, match="Failed to fetch validator dashboard"):
+        with pytest.raises(HyperscaledError) as excinfo:
             await client.payouts.history_async()
+        assert excinfo.value.code == "HS_API_500"
+        assert excinfo.value.retryable is True
 
         await client.close()
 
@@ -194,8 +196,10 @@ class TestPayoutsHistory:
             side_effect=httpx.ConnectError("connection refused")
         )
 
-        with pytest.raises(HyperscaledError, match="Failed to fetch validator dashboard"):
+        with pytest.raises(HyperscaledError) as excinfo:
             await client.payouts.history_async()
+        assert excinfo.value.code == "HS_NETWORK_ERROR"
+        assert excinfo.value.retryable is True
 
         await client.close()
 
