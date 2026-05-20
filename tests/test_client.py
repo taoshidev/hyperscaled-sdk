@@ -59,8 +59,7 @@ class TestConstruction:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         config_path = tmp_path / "config.toml"
-        config = Config()
-        config._path = config_path
+        config = Config.load(path=config_path)
         config.wallet = WalletConfig(hl_address=VALID_ADDRESS)
         config.save()
 
