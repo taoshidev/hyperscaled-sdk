@@ -61,3 +61,15 @@ class ClosedPosition(Position):
 
     realized_pnl: Decimal
     close_time: datetime
+
+
+class PositionComparison(BaseModel):
+    """Side-by-side view of open positions as tracked by the Vanta Network
+    validator and as held on the Hyperliquid exchange.
+
+    Field names match the existing ``hyperscaled positions compare --json``
+    CLI output so REST consumers see the same shape.
+    """
+
+    vanta: list[Position]
+    exchange: list[Position]
