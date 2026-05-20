@@ -71,6 +71,7 @@ class Config(BaseModel):
     api: ApiConfig = ApiConfig()
 
     _path: Path = _DEFAULT_PATH
+    _persistent: bool = False
 
     @classmethod
     def load(cls, path: Path | None = None) -> Config:
@@ -90,6 +91,7 @@ class Config(BaseModel):
             config = cls()
 
         config._path = config_path
+        config._persistent = True
         config._apply_env_fallbacks(data)
 
         if not config_path.exists():
@@ -97,8 +99,28 @@ class Config(BaseModel):
 
         return config
 
+    @classmethod
+    def in_memory(cls) -> Config:
+        """Build a config with no file or environment coupling.
+
+        Use this in multi-tenant server contexts (FastAPI, prop firm). Writes
+        via :meth:`save` are no-ops, and :meth:`load`-time env fallbacks are
+        skipped, so credentials never leak between tenants in one process.
+
+        Callers are responsible for setting values explicitly after construction.
+        """
+        return cls()
+
     def save(self, path: Path | None = None) -> None:
-        """Write the current config to TOML."""
+        """Write the current config to TOML.
+
+        In-memory configs (built via :meth:`in_memory`) silently no-op unless
+        an explicit *path* is provided. This keeps SDK consumer code (e.g.
+        ``register.py`` persisting funded_account_id) safe to call in both
+        CLI and multi-tenant server contexts.
+        """
+        if path is None and not self._persistent:
+            return
         target = path or self._path
         target.parent.mkdir(parents=True, exist_ok=True)
         os.chmod(target.parent, 0o700)

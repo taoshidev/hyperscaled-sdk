@@ -29,7 +29,7 @@ class TestConfigModel:
         assert config.account.funded_account_id == ""
         assert config.account.kyc_status == "not_started"
         assert config.api.hyperscaled_base_url == "https://www.hyperscaled.trade"
-        assert config.api.validator_api_url == "http://34.187.154.219:48888"
+        assert config.api.validator_api_url == "https://validator.mainnet.vantatrading.io"
 
     def test_valid_address_accepted(self) -> None:
         wallet = WalletConfig(hl_address=VALID_ADDRESS)
@@ -77,8 +77,7 @@ class TestLoadSave:
 
     def test_save_and_reload(self, tmp_path: Path) -> None:
         config_path = tmp_path / "config.toml"
-        config = Config()
-        config._path = config_path
+        config = Config.load(path=config_path)
         config.wallet = WalletConfig(hl_address=VALID_ADDRESS)
         config.save()
 
@@ -113,6 +112,36 @@ class TestLoadSave:
         config = Config()
         with pytest.raises(ValueError, match="expected format"):
             config.set_value("justonepart", "val")
+
+
+# ── In-memory mode ──────────────────────────────────────────
+
+
+class TestInMemoryMode:
+    def test_in_memory_save_is_noop(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "config.toml"
+        config = Config.in_memory()
+        # Set the path attr but DON'T pass to save() — should still no-op.
+        config._path = config_path
+        config.wallet = WalletConfig(hl_address=VALID_ADDRESS)
+        config.save()
+        assert not config_path.exists()
+
+    def test_in_memory_save_with_explicit_path_writes(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "config.toml"
+        config = Config.in_memory()
+        config.wallet = WalletConfig(hl_address=VALID_ADDRESS)
+        config.save(path=config_path)
+        assert config_path.exists()
+
+    def test_load_marks_persistent(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "config.toml"
+        config = Config.load(path=config_path)
+        assert config._persistent is True
+
+    def test_in_memory_marks_non_persistent(self) -> None:
+        config = Config.in_memory()
+        assert config._persistent is False
 
 
 # ── Env var fallbacks ───────────────────────────────────────
@@ -151,8 +180,7 @@ class TestEnvVarFallbacks:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         config_path = tmp_path / "config.toml"
-        config = Config()
-        config._path = config_path
+        config = Config.load(path=config_path)
         config.wallet = WalletConfig(hl_address=VALID_ADDRESS)
         config.save()
 
@@ -165,8 +193,7 @@ class TestEnvVarFallbacks:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         config_path = tmp_path / "config.toml"
-        config = Config()
-        config._path = config_path
+        config = Config.load(path=config_path)
         config.api.hyperscaled_base_url = "https://from-file.example.com"
         config.save()
 
